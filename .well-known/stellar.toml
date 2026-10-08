@@ -1,0 +1,64 @@
+# Stellar Asset Verification Manifest (SEP-1)
+# Structured Fiduciary Architecture: Fiduciary Executor (FE) & Trust Relationship
+
+# The Shared Web Verification Domain
+HOME_DOMAIN = "sfe-dynasty.github.io"
+
+# Authorized System Accounts Linked to this Framework
+# NOTE: Replace the long string text below with your exact 56-character public keys
+ACCOUNTS = [
+  "GCLFWV2RMDZYNAMUCBH54U43DP3MSWGCIVOH6SK6F4SVMYYR3CQSLKOP", # Trust Issuer Node
+  "GCHQWVJ56MQNWSDAXSQEO74WIT76VCCDYLWOWATGRD7SNMCZIQOCEHML"  # Fiduciary Executor Clearing Node
+]
+
+# --- SEP-24 ROUTING & CLEARING PROTOCOLS ---
+# These parameters point automated engines directly to your clearing infrastructure
+SIGNING_KEY = "GCHQWVJ56MQNWSDAXSQEO74WIT76VCCDYLWOWATGRD7SNMCZIQOCEHML"
+TRANSFER_SERVER_SEP0024 = "https://sfe-dynasty.github.io"
+WEB_AUTH_ENDPOINT = "https://sfe-dynasty.github.io"
+
+# --- INSTITUTIONAL ROLES & PRINCIPALS ---
+
+# 1. The Fiduciary Executor (FE) Governance Profile
+[[ORGANIZATION]]
+name = "Fiduciary Executor (FE) Node Administration"
+description = "Administrative clearing domain executing sovereign settlement rules for general intangibles."
+official_email = "ddennis@sfemeraldtrust.com"
+
+# 2. The Private Trust Profile
+[[DOCUMENTATION]]
+org_name = "The SF Emerald Dynasty Trust"
+org_description = "Programmatic asset value container managed via private trust relationship rules."
+org_official_email = "ddennis@sfemeraldtrust.com"
+
+# --- CUSTOM ASSET REGISTRIES (TRUST INSTRUMENTS) ---
+
+[[CURRENCIES]]
+code = "SFETREAS"
+issuer = "GCLFWV2RMDZYNAMUCBH54U43DP3MSWGCIVOH6SK6F4SVMYYR3CQSLKOP"
+display_decimals = 2
+name = "Private Fiduciary Trust Treasury Instrument"
+is_asset_anchored = true
+anchor_asset_type = "fiat"
+anchor_asset = "USD"
+desc = "Programmatic value backed as documented rights with a sole FE/Trust relationship. Fixed face value of 1.00 USD per unit. Cleared through Fiduciary Executor Node GCHQWVJ56MQNWSDAXSQEO74WIT76VCCDYLWOWATGRD7SNMCZIQOCEHML. Contract reference: US-SFE-PFIA-2025-T1A01."
+
+[[CURRENCIES]]
+code = "SFE2025PTN"
+issuer = "GCLFWV2RMDZYNAMUCBH54U43DP3MSWGCIVOH6SK6F4SVMYYR3CQSLKOP"
+display_decimals = 2
+name = "Private Fiduciary Trust Instrument PTN"
+is_asset_anchored = true
+anchor_asset_type = "fiat"
+anchor_asset = "USD"
+desc = "Programmatic fiduciary asset representing structural cleared general intangibles. Fixed face value of 1.00 USD per unit. Controlled via Fiduciary Executor Node GCHQWVJ56MQNWSDAXSQEO74WIT76VCCDYLWOWATGRD7SNMCZIQOCEHML. Contract reference: US-SFE-PFIA-2025-T1A01."
+
+[[CURRENCIES]]
+code = "SFE2025PSCI"
+issuer = "GCLFWV2RMDZYNAMUCBH54U43DP3MSWGCIVOH6SK6F4SVMYYR3CQSLKOP"
+display_decimals = 2
+name = "Private Fiduciary Trust Instrument PSCI"
+is_asset_anchored = true
+anchor_asset_type = "fiat"
+anchor_asset = "USD"
+desc = "Programmatic fiduciary asset representing structural cleared general intangibles. Fixed face value of 1.00 USD per unit. Controlled via Fiduciary Executor Node GCHQWVJ56MQNWSDAXSQEO74WIT76VCCDYLWOWATGRD7SNMCZIQOCEHML. Contract reference: US-SFE-PFIA-2025-T1A01."
