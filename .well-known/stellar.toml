@@ -14,7 +14,7 @@ ACCOUNTS = [
 # --- SEP-24 ROUTING & CLEARING PROTOCOLS ---
 # These parameters point automated engines directly to your clearing infrastructure
 SIGNING_KEY = "GCHQWVJ56MQNWSDAXSQEO74WIT76VCCDYLWOWATGRD7SNMCZIQOCEHML"
-TRANSFER_SERVER_SEP0024 = "https://fiduciary-clearing-engine.onrender.com"
+TRANSFER_SERVER = "https://fiduciary-clearing-engine.onrender.com"
 WEB_AUTH_ENDPOINT = "https://fiduciary-clearing-engine.onrender.com"
 
 # --- INSTITUTIONAL ROLES & PRINCIPALS ---
