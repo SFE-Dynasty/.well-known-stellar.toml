@@ -1,3 +1,12 @@
+@app.route('/', methods=['GET'])
+def root_status():
+    return jsonify({
+        "service": "SF Emerald Dynasty Fiduciary Clearing Engine",
+        "status": "active",
+        "listener": "direct_horizon_sse",
+        "contract": EXPECTED_CONTRACT
+    }), 200
+
 import os
 import sys
 import time
