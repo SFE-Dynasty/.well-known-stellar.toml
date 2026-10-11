@@ -21,7 +21,7 @@ HORIZON_URL = "https://horizon.stellar.org"
 
 def process_transaction_record(tx_data, operations_data):
     tx_hash = tx_data.get("id")
-    raw_seq = tx_data.get("paging_token", "").split("-")[0] if tx_data.get("paging_token") else tx_data.get("ledger", 0)
+    raw_seq = tx_data.get("paging_token", "").split("-") if tx_data.get("paging_token") else tx_data.get("ledger", 0)
     fee_charged = tx_data.get("fee_charged", 0)
     source_acct = tx_data.get("source_account")
     
@@ -45,16 +45,17 @@ def process_transaction_record(tx_data, operations_data):
                         credit_out = 0.0
                         tranche_tag = "RESTORED_LIABILITY_BASELINE"
                     elif asset_code == "SFE2025PSCI":
-                        anchor_name = "Private_Sovereign_Credit_Instrument"
+                        anchor_name = "Private_Secured_Capital_Instrument"
                         reported_units = 2500000.00
                         credit_out = 0.0
                         tranche_tag = "RESTORED_LIABILITY_BASELINE"
                     elif asset_code == "SFETREAS":
                         anchor_name = "Sovereign_Trust_Treasury_Certificate"
                         reported_units = amount
-                        primary_flat = 250000.00 if amount >= 250000.00 else amount
-                        credit_out = primary_flat
-                        tranche_tag = "PRIMARY_FLAT_250K_TRANCHE" if amount >= 250000.00 else "AUXILIARY_DEPLOYMENT"
+                        primary_base_cap = 250000.00
+                        credit_out = min(amount, primary_base_cap) if amount > 0 else 0.0
+                        surplus_remainder = max(0.0, amount - primary_base_cap)
+                        tranche_tag = f"PRIMARY_FLAT_250K_CAP (OnChain_Sent={amount:.2f}, Surplus_Reserved={surplus_remainder:.2f})"
 
                     comprehensive_row = {
                         "CLEARING_TIMESTAMP": datetime.utcnow().isoformat() + "Z",
@@ -71,7 +72,7 @@ def process_transaction_record(tx_data, operations_data):
                         "LEDGER_SEQUENCE": int(raw_seq) if str(raw_seq).isdigit() else 0,
                         "STROOP_FEE_CONSUMED": int(fee_charged),
                         "BLOCKCHAIN_NETWORK": STELLAR_NETWORK,
-                        "COMPILER_RUNTIME": f"Python {sys.version.split()[0]}",
+                        "COMPILER_RUNTIME": f"Python {sys.version.split()}",
                         "ROUTING_INFRASTRUCTURE": SERVICE_NAME,
                         "PLATFORM_HOSTNAME": HOSTNAME
                     }
