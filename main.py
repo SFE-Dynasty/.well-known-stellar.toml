@@ -10,12 +10,12 @@ from flask import Flask, jsonify
 app = Flask(__name__)
 
 # Injected Render Environment Variables
-ISSUER_ACCOUNT = os.environ.get("ISSUER_ACCOUNT", "GCLFWVVI2J3G25SZUPF76NDIDW7SFT7ZREH2NDVGAIQV56L6T7JQSLKOP")
-EXECUTOR_ACCOUNT = os.environ.get("EXECUTOR_ACCOUNT", "GCHQW...IQOCEHM")
+ISSUER_ACCOUNT = os.environ.get("ISSUER_ACCOUNT", "GCLFWV2RMDZYNAMUCBH54U43DP3MSWGCIVOH6SK6F4SVMYYR3CQSLKOP")
+EXECUTOR_ACCOUNT = os.environ.get("EXECUTOR_ACCOUNT", "GCHQWVJ56MQNWSDAXSQEO74WIT76VCCDYLWOWATGRD7SNMCZIQOCEHML")
 EXPECTED_CONTRACT = os.environ.get("CONTRACT_REFERENCE", "US-SFE-PFIA-2025-T1A01")
 STELLAR_NETWORK = os.environ.get("STELLAR_NETWORK", "Public")
 SERVICE_NAME = os.environ.get("RENDER_SERVICE_NAME", "fiduciary-clearing-engine")
-HOSTNAME = os.environ.get("RENDER_EXTERNAL_HOSTNAME", "://onrender.com")
+HOSTNAME = os.environ.get("RENDER_EXTERNAL_HOSTNAME", "fiduciary-clearing-engine.onrender.com")
 
 HORIZON_URL = "https://stellar.org"
 
