@@ -1,72 +1,128 @@
 import os
 import sys
-import hmac
-import hashlib
-from flask import Flask, request, jsonify
+import time
+import requests
+import json
+import threading
 from datetime import datetime
+from flask import Flask, jsonify
 
 app = Flask(__name__)
 
-# Enforce the strict Contract Reference established in your GitHub manifest
+# Injected Render Environment Variables
+ISSUER_ACCOUNT = os.environ.get("ISSUER_ACCOUNT", "GCLFWVVI2J3G25SZUPF76NDIDW7SFT7ZREH2NDVGAIQV56L6T7JQSLKOP")
+EXECUTOR_ACCOUNT = os.environ.get("EXECUTOR_ACCOUNT", "GCHQW...IQOCEHM")
 EXPECTED_CONTRACT = os.environ.get("CONTRACT_REFERENCE", "US-SFE-PFIA-2025-T1A01")
+STELLAR_NETWORK = os.environ.get("STELLAR_NETWORK", "Public")
+SERVICE_NAME = os.environ.get("RENDER_SERVICE_NAME", "fiduciary-clearing-engine")
+HOSTNAME = os.environ.get("RENDER_EXTERNAL_HOSTNAME", "://onrender.com")
 
-def verify_bitbond_signature(raw_payload, inbound_signature):
-    """Cryptographically validates that the data packet came directly from Bitbond"""
-    secret = os.environ.get("BITBOND_WEBHOOK_SECRET", "").encode('utf-8')
-    if not secret:
-        return False
-    computed_signature = hmac.new(secret, raw_payload, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(computed_signature, inbound_signature)
+HORIZON_URL = "https://stellar.org"
 
-@app.route('/api/v1/clearance', methods=['POST'])
-def process_fiduciary_clearance():
-    # 1. Capture the raw network payload data string
-    raw_data = request.get_data()
-    inbound_sig = request.headers.get('X-Bitbond-Signature', '')
+def process_transaction_record(tx_data, operations_data):
+    """Parses raw ledger data and compiles the comprehensive 16-column accounting row."""
+    tx_hash = tx_data.get("id")
+    raw_seq = tx_data.get("paging_token", "").split("-")[0] if tx_data.get("paging_token") else tx_data.get("ledger", 0)
+    fee_charged = tx_data.get("fee_charged", 0)
+    source_acct = tx_data.get("source_account")
     
-    # 2. Enforce strict data validation checks before parsing
-    if not verify_bitbond_signature(raw_data, inbound_sig):
-        return jsonify({"status": "error", "message": "Unauthorized payload source"}), 401
-        
-    payload = request.get_json()
-    tx_data = payload.get("transaction", {})
-    memo_text = tx_data.get("memo", "")
+    embedded_ops = operations_data.get("_embedded", {}).get("records", [])
     
-    # 3. Verify that the inbound block matches your exact Contract tracking reference
-    if memo_text != EXPECTED_CONTRACT:
-        return jsonify({"status": "error", "message": "Contract mismatch"}), 400
+    for op in embedded_ops:
+        op_type = op.get("type")
+        if op_type in ["payment", "path_payment_strict_receive", "path_payment_strict_send"]:
+            asset_type = op.get("asset_type", "")
+            if asset_type != "native":
+                asset_code = op.get("asset_code", "")
+                asset_issuer = op.get("asset_issuer", "")
+                amount = float(op.get("amount", 0.0))
+                dest_acct = op.get("to")
+                src_acct = op.get("from") or source_acct
+                
+                # Filter for your specific trust instruments
+                if asset_code in ["SFETREAS", "SFE2025PTN", "SFE2025PSCI"] and asset_issuer == ISSUER_ACCOUNT:
+                    anchor_map = {
+                        "SFETREAS": "Sovereign_Trust_Treasury_Certificate",
+                        "SFE2025PTN": "Private_Trust_Note_Series_2025",
+                        "SFE2025PSCI": "Private_Secured_Capital_Instrument"
+                    }
+                    
+                    # 20% release calculation for PTN/PSCI surrenders, direct tracking for SFETREAS
+                    credit_out = amount * 0.20 if asset_code in ["SFE2025PTN", "SFE2025PSCI"] else amount
 
-    # 4. Map the exact primary and secondary data columns for your private ledger sheets
-    comprehensive_row = {
-        # --- Primary Accounting Core ---
-        "CLEARING_TIMESTAMP": datetime.utcnow().isoformat() + "Z",
-        "CONTRACT_REFERENCE": EXPECTED_CONTRACT,
-        "TRANSACTION_ID": tx_data.get("id"),
-        "INSTRUMENT_CODE": tx_data.get("asset_code"),
-        "ANCHOR_IDENTIFIER": tx_data.get("anchor_name", "Private_Trust_Note_Series_2025"),
-        "SURRENDERED_UNITS": float(tx_data.get("amount", 0)),
-        "CLEARANCE_STATUS": "SUCCESS_VERIFIED" if tx_data.get("status") == "completed" else "FAILED",
-        "TREASURY_CREDIT_OUT": float(tx_data.get("amount", 0)) * 0.20, # 20% Release ratio
-        
-        # --- Expanded Audit Elements ---
-        "SOURCE_CLEARING_NODE": tx_data.get("source_account"),
-        "VAULT_DESTINATION": tx_data.get("destination_account"),
-        "LEDGER_SEQUENCE": int(tx_data.get("ledger_sequence", 0)),
-        "STROOP_FEE_CONSUMED": int(tx_data.get("fee_charged", 0)),
-        
-        # --- Platform Infrastructure Verification ---
-        "BLOCKCHAIN_NETWORK": os.environ.get("STELLAR_NETWORK", "Public"),
-        "COMPILER_RUNTIME": f"Python {sys.version.split()[0]}",
-        "ROUTING_INFRASTRUCTURE": os.environ.get("RENDER_SERVICE_NAME", "fiduciary-clearing-engine"),
-        "PLATFORM_HOSTNAME": os.environ.get("RENDER_EXTERNAL_HOSTNAME", "unknown")
-    }
+                    comprehensive_row = {
+                        # --- Primary Accounting Core ---
+                        "CLEARING_TIMESTAMP": datetime.utcnow().isoformat() + "Z",
+                        "CONTRACT_REFERENCE": EXPECTED_CONTRACT,
+                        "TRANSACTION_ID": tx_hash,
+                        "INSTRUMENT_CODE": asset_code,
+                        "ANCHOR_IDENTIFIER": anchor_map.get(asset_code, "Custom_Trust_Asset"),
+                        "SURRENDERED_UNITS": amount,
+                        "CLEARANCE_STATUS": "SUCCESS_VERIFIED" if tx_data.get("successful") else "FAILED",
+                        "TREASURY_CREDIT_OUT": credit_out,
+                        
+                        # --- Expanded Audit Elements ---
+                        "SOURCE_CLEARING_NODE": src_acct,
+                        "VAULT_DESTINATION": dest_acct,
+                        "LEDGER_SEQUENCE": int(raw_seq) if str(raw_seq).isdigit() else 0,
+                        "STROOP_FEE_CONSUMED": int(fee_charged),
+                        
+                        # --- Platform Infrastructure Verification ---
+                        "BLOCKCHAIN_NETWORK": STELLAR_NETWORK,
+                        "COMPILER_RUNTIME": f"Python {sys.version.split()[0]}",
+                        "ROUTING_INFRASTRUCTURE": SERVICE_NAME,
+                        "PLATFORM_HOSTNAME": HOSTNAME
+                    }
+                    
+                    # Flush immutable audit row to Render terminal logs / private sheets
+                    print(f"\n[DIRECT HORIZON AUDIT LOG]: {json.dumps(comprehensive_row)}", flush=True)
+                    return comprehensive_row
+    return None
+
+def horizon_stream_listener():
+    """Background SSE loop watching live transactions for the Issuer Account"""
+    stream_url = f"{HORIZON_URL}/accounts/{ISSUER_ACCOUNT}/transactions?cursor=now"
+    headers = {"Accept": "text/event-stream"}
     
-    # Stream the compiled dataset straight to your live Render log dashboard terminal screen
-    print(f"[TREASURY AUDIT LOG ENTRY]: {comprehensive_row}", flush=True)
+    print(f"[HORIZON LISTENER ACTIVE] Streaming mainnet events for {ISSUER_ACCOUNT[:12]}...", flush=True)
     
-    return jsonify({"status": "completed", "transaction_id": comprehensive_row["TRANSACTION_ID"]}), 200
+    while True:
+        try:
+            with requests.get(stream_url, headers=headers, stream=True, timeout=60) as response:
+                if response.status_code == 200:
+                    for line in response.iter_lines():
+                        if line:
+                            decoded = line.decode('utf-8')
+                            if decoded.startswith("data: "):
+                                json_str = decoded[6:]
+                                if json_str.strip() == '"hello"':
+                                    continue
+                                try:
+                                    tx_obj = json.loads(json_str)
+                                    tx_id = tx_obj.get("id")
+                                    ops_url = f"{HORIZON_URL}/transactions/{tx_id}/operations"
+                                    ops_res = requests.get(ops_url, timeout=10)
+                                    if ops_res.status_code == 200:
+                                        process_transaction_record(tx_obj, ops_res.json())
+                                except Exception as parse_err:
+                                    print(f"[STREAM PARSE ERROR]: {parse_err}", flush=True)
+                else:
+                    print(f"[HORIZON HTTP ERROR]: Status {response.status_code}. Retrying in 5s...", flush=True)
+                    time.sleep(5)
+        except Exception as conn_err:
+            print(f"[HORIZON CONNECTION DROP]: {conn_err}. Reconnecting in 5s...", flush=True)
+            time.sleep(5)
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    return jsonify({"status": "active", "listener": "direct_horizon_sse", "network": STELLAR_NETWORK}), 200
 
 if __name__ == '__main__':
-    # Internal communication port assigned by Render's compiler runtime
+    # Launch background thread watching live mainnet
+    t = threading.Thread(target=horizon_stream_listener, daemon=True)
+    t.start()
+    
+    # Bind to Render's required port
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
+
