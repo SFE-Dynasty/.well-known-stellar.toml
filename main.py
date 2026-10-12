@@ -177,7 +177,6 @@ def validate_liquidity_path():
 def execute_digital_settle():
     inbound_sig = request.headers.get('X-Sovereign-Sig', '')
     
-    # Secure Passphrase Bypass to accommodate local compilation limits
     if inbound_sig != "Thesfedynasty30*":
         return jsonify({"status": "rejected", "reason": "Invalid gateway signature credentials"}), 401
 
@@ -185,28 +184,77 @@ def execute_digital_settle():
     if payload.get("memo", EXPECTED_CONTRACT) != EXPECTED_CONTRACT:
         return jsonify({"status": "error", "reason": "Contract reference verification mismatch"}), 400
 
-    # Simulates clearing engine path payment trigger for downstream settlement routing
-    mock_receipt = {
-        "CLEARING_TIMESTAMP": datetime.utcnow().isoformat() + "Z",
-        "CONTRACT_REFERENCE": EXPECTED_CONTRACT,
-        "TRANSACTION_ID": "AUTOMATED_M2M_CLEARANCE_STUB",
-        "INSTRUMENT_CODE": "SFETREAS->USDC",
-        "ANCHOR_IDENTIFIER": "Sovereign_Trust_MoneyGram_Anchor",
-        "SURRENDERED_UNITS": 250000.00,
-        "CLEARANCE_STATUS": "SUCCESS_VERIFIED",
-        "TREASURY_CREDIT_OUT": 250000.00,
-        "TRANCHE_CLASSIFICATION": "PRIMARY_TRANCH_CURRENCY_CONVERSION",
-        "SOURCE_CLEARING_NODE": EXECUTOR_ACCOUNT,
-        "VAULT_DESTINATION": payload.get("recipient_usdc_address"),
-        "LEDGER_SEQUENCE": 0,
-        "STROOP_FEE_CONSUMED": 300,
-        "BLOCKCHAIN_NETWORK": STELLAR_NETWORK,
-        "COMPILER_RUNTIME": f"Python {sys.version.split()}",
-        "ROUTING_INFRASTRUCTURE": SERVICE_NAME,
-        "PLATFORM_HOSTNAME": HOSTNAME
-    }
-    print(f"\n[MONEYGRAM CORRIDOR CLEARANCE LOG]: {json.dumps(mock_receipt)}", flush=True)
-    return jsonify({"status": "settled", "receipt": mock_receipt}), 200
+    try:
+        # Load the live executor keys securely from your Render Environment panel
+        from stellar_sdk import Server, Network, Asset, Keypair
+        from stellar_sdk.transaction_builder import TransactionBuilder
+        from stellar_sdk.operation import PathPaymentStrictReceive
+        from stellar_sdk.memo import TextMemo
+
+        local_server = Server("https://stellar.org")
+        executor_kp = Keypair.from_secret(os.environ.get("SEP10_SIGNING_PRIVATE_KEY"))
+        source_account = local_server.load_account(executor_kp.public_key)
+
+        recipient_destination = payload["recipient_usdc_address"]
+        delivery_amount = str(payload.get("amount", "250000.00"))
+        max_source_spend = str(payload.get("max_source_spend", "250050.00"))
+
+        source_asset = Asset("SFETREAS", ISSUER_ACCOUNT)
+        destination_asset = Asset("USDC", USDC_ISSUER)
+
+        # Build the live path payment operation
+        op_path_pay = PathPaymentStrictReceive(
+            send_asset=source_asset,
+            send_max=max_source_spend,
+            destination=recipient_destination,
+            dest_asset=destination_asset,
+            dest_amount=delivery_amount,
+            path=[]
+        )
+
+        tx = (
+            TransactionBuilder(
+                source_account=source_account,
+                network_passphrase=Network.PUBLIC_NETWORK_PASSPHRASE,
+                base_fee=300
+            )
+            .append_operation(op_path_pay)
+            .add_memo(TextMemo(EXPECTED_CONTRACT[:28]))
+            .set_timeout(30)
+            .build()
+        )
+
+        tx.sign(executor_kp)
+        response = local_server.submit_transaction(tx)
+        
+        tx_hash = response.get("hash")
+        ledger_seq = response.get("ledger")
+
+        live_receipt = {
+            "CLEARING_TIMESTAMP": datetime.utcnow().isoformat() + "Z",
+            "CONTRACT_REFERENCE": EXPECTED_CONTRACT,
+            "TRANSACTION_ID": tx_hash,
+            "INSTRUMENT_CODE": "SFETREAS->USDC",
+            "ANCHOR_IDENTIFIER": "Sovereign_Trust_MoneyGram_Anchor",
+            "SURRENDERED_UNITS": float(max_source_spend),
+            "CLEARANCE_STATUS": "DIRECT_PRINCIPAL_SETTLED",
+            "TREASURY_CREDIT_OUT": float(delivery_amount),
+            "TRANCHE_CLASSIFICATION": "PRIMARY_TRANCH_CURRENCY_CONVERSION",
+            "SOURCE_CLEARING_NODE": executor_kp.public_key,
+            "VAULT_DESTINATION": recipient_destination,
+            "LEDGER_SEQUENCE": int(ledger_seq),
+            "STROOP_FEE_CONSUMED": 300,
+            "BLOCKCHAIN_NETWORK": STELLAR_NETWORK,
+            "COMPILER_RUNTIME": f"Python {sys.version.split()}",
+            "ROUTING_INFRASTRUCTURE": SERVICE_NAME,
+            "PLATFORM_HOSTNAME": HOSTNAME
+        }
+
+        print(f"\n[MONEYGRAM CORRIDOR CLEARANCE LOG]: {json.dumps(live_receipt)}", flush=True)
+        return jsonify({"status": "settled", "receipt": live_receipt}), 200
+
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/health', methods=['GET'])
 def health_check():
