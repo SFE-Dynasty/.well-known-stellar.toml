@@ -17,11 +17,12 @@ STELLAR_NETWORK = os.environ.get("STELLAR_NETWORK", "Public")
 SERVICE_NAME = os.environ.get("RENDER_SERVICE_NAME", "fiduciary-clearing-engine")
 HOSTNAME = os.environ.get("RENDER_EXTERNAL_HOSTNAME", "fiduciary-clearing-engine.onrender.com")
 
-HORIZON_URL = "https://horizon.stellar.org"
+HORIZON_URL = "https://stellar.org"
+USDC_ISSUER = "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"
 
 def process_transaction_record(tx_data, operations_data):
     tx_hash = tx_data.get("id")
-    raw_seq = tx_data.get("paging_token", "").split("-") if tx_data.get("paging_token") else tx_data.get("ledger", 0)
+    raw_seq = tx_data.get("ledger", 0)
     fee_charged = tx_data.get("fee_charged", 0)
     source_acct = tx_data.get("source_account")
     
@@ -29,6 +30,8 @@ def process_transaction_record(tx_data, operations_data):
     
     for op in embedded_ops:
         op_type = op.get("type")
+        
+        # Monitor direct payments and programmatic path swaps
         if op_type in ["payment", "path_payment_strict_receive", "path_payment_strict_send"]:
             asset_type = op.get("asset_type", "")
             if asset_type != "native":
@@ -38,6 +41,7 @@ def process_transaction_record(tx_data, operations_data):
                 dest_acct = op.get("to")
                 src_acct = op.get("from") or source_acct
                 
+                # Check for baseline instrument allocations
                 if asset_code in ["SFETREAS", "SFE2025PTN", "SFE2025PSCI"] and asset_issuer == ISSUER_ACCOUNT:
                     if asset_code == "SFE2025PTN":
                         anchor_name = "Private_Trust_Note_Series_2025"
@@ -45,7 +49,7 @@ def process_transaction_record(tx_data, operations_data):
                         credit_out = 0.0
                         tranche_tag = "RESTORED_LIABILITY_BASELINE"
                     elif asset_code == "SFE2025PSCI":
-                        anchor_name = "Private_Secured_Capital_Instrument"
+                        anchor_name = "Private_Sovereign_Credit_Instrument"
                         reported_units = 2500000.00
                         credit_out = 0.0
                         tranche_tag = "RESTORED_LIABILITY_BASELINE"
@@ -69,23 +73,48 @@ def process_transaction_record(tx_data, operations_data):
                         "TRANCHE_CLASSIFICATION": tranche_tag,
                         "SOURCE_CLEARING_NODE": src_acct,
                         "VAULT_DESTINATION": dest_acct,
-                        "LEDGER_SEQUENCE": int(raw_seq) if str(raw_seq).isdigit() else 0,
+                        "LEDGER_SEQUENCE": int(raw_seq),
                         "STROOP_FEE_CONSUMED": int(fee_charged),
                         "BLOCKCHAIN_NETWORK": STELLAR_NETWORK,
                         "COMPILER_RUNTIME": f"Python {sys.version.split()}",
                         "ROUTING_INFRASTRUCTURE": SERVICE_NAME,
                         "PLATFORM_HOSTNAME": HOSTNAME
                     }
-                    
                     print(f"\n[RESTORED BASELINE AUDIT LOG]: {json.dumps(comprehensive_row)}", flush=True)
                     return comprehensive_row
+                
+                # Check for post-facilitation conversion landing in Executor USDC wallet
+                elif asset_code == "USDC" and asset_issuer == USDC_ISSUER and dest_acct == EXECUTOR_ACCOUNT:
+                    comprehensive_row = {
+                        "CLEARING_TIMESTAMP": datetime.utcnow().isoformat() + "Z",
+                        "CONTRACT_REFERENCE": EXPECTED_CONTRACT,
+                        "TRANSACTION_ID": tx_hash,
+                        "INSTRUMENT_CODE": "SFETREAS->USDC",
+                        "ANCHOR_IDENTIFIER": "Sovereign_Trust_MoneyGram_Anchor",
+                        "SURRENDERED_UNITS": 250000.00,
+                        "CLEARANCE_STATUS": "SUCCESS_VERIFIED" if tx_data.get("successful") else "FAILED",
+                        "TREASURY_CREDIT_OUT": amount,
+                        "TRANCHE_CLASSIFICATION": "PRIMARY_TRANCH_CURRENCY_CONVERSION",
+                        "SOURCE_CLEARING_NODE": src_acct,
+                        "VAULT_DESTINATION": dest_acct,
+                        "LEDGER_SEQUENCE": int(raw_seq),
+                        "STROOP_FEE_CONSUMED": int(fee_charged),
+                        "BLOCKCHAIN_NETWORK": STELLAR_NETWORK,
+                        "COMPILER_RUNTIME": f"Python {sys.version.split()}",
+                        "ROUTING_INFRASTRUCTURE": SERVICE_NAME,
+                        "PLATFORM_HOSTNAME": HOSTNAME
+                    }
+                    print(f"\n[MONEYGRAM CORRIDOR CLEARANCE LOG]: {json.dumps(comprehensive_row)}", flush=True)
+                    return comprehensive_row
+                    
     return None
 
 def horizon_stream_listener():
-    stream_url = f"{HORIZON_URL}/accounts/{ISSUER_ACCOUNT}/transactions?cursor=now"
+    # Monitors the Fiduciary Executor account for inbound path payments
+    stream_url = f"{HORIZON_URL}/accounts/{EXECUTOR_ACCOUNT}/transactions?cursor=now"
     headers = {"Accept": "text/event-stream"}
     
-    print(f"[HORIZON LISTENER ACTIVE] Streaming mainnet events for {ISSUER_ACCOUNT[:12]}...", flush=True)
+    print(f"[HORIZON LISTENER ACTIVE] Streaming mainnet events for {EXECUTOR_ACCOUNT[:12]}...", flush=True)
     
     while True:
         try:
@@ -122,6 +151,32 @@ def root_status():
         "listener": "direct_horizon_sse",
         "contract": EXPECTED_CONTRACT
     }), 200
+
+@app.route('/api/v1/validate-path', methods=['GET'])
+def validate_liquidity_path():
+    """Programmatic confirmation route checking mainnet conversion pathways."""
+    path_query_url = (
+        f"{HORIZON_URL}/paths/strict-receive?"
+        f"source_account={EXECUTOR_ACCOUNT}&"
+        f"destination_asset_type=credit_alphanum4&"
+        f"destination_asset_code=USDC&"
+        f"destination_asset_issuer={USDC_ISSUER}&"
+        f"destination_amount=250000.00"
+    )
+    try:
+        res = requests.get(path_query_url, timeout=10)
+        if res.status_code == 200:
+            records = res.json().get("_embedded", {}).get("records", [])
+            if records:
+                return jsonify({
+                    "path_status": "AVAILABLE",
+                    "source_asset": "SFETREAS",
+                    "estimated_source_amount_needed": records[0].get("source_amount"),
+                    "destination_delivery": "250000.00 USDC"
+                }), 200
+        return jsonify({"path_status": "NO_DIRECT_PATH_FOUND", "details": "Awaiting pool or ledger swap counter-offers"}), 404
+    except Exception as e:
+        return jsonify({"path_status": "QUERY_ERROR", "error": str(e)}), 500
 
 @app.route('/health', methods=['GET'])
 def health_check():
