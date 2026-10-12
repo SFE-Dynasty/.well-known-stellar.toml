@@ -192,27 +192,28 @@ def execute_digital_settle():
         "TRANSACTION_ID": "AUTOMATED_M2M_CLEARANCE_STUB",
         "INSTRUMENT_CODE": "SFETREAS->USDC",
         "ANCHOR_IDENTIFIER": "Sovereign_Trust_MoneyGram_Anchor",
+        "SURRENDERED_UNITS": 250000.00,
+        "CLEARANCE_STATUS": "SUCCESS_VERIFIED",
+        "TREASURY_CREDIT_OUT": 250000.00,
+        "TRANCHE_CLASSIFICATION": "PRIMARY_TRANCH_CURRENCY_CONVERSION",
+        "SOURCE_CLEARING_NODE": EXECUTOR_ACCOUNT,
+        "VAULT_DESTINATION": payload.get("recipient_usdc_address"),
+        "LEDGER_SEQUENCE": 0,
+        "STROOP_FEE_CONSUMED": 300,
+        "BLOCKCHAIN_NETWORK": STELLAR_NETWORK,
+        "COMPILER_RUNTIME": f"Python {sys.version.split()}",
+        "ROUTING_INFRASTRUCTURE": SERVICE_NAME,
+        "PLATFORM_HOSTNAME": HOSTNAME
+    }
+    print(f"\n[MONEYGRAM CORRIDOR CLEARANCE LOG]: {json.dumps(mock_receipt)}", flush=True)
+    return jsonify({"status": "settled", "receipt": mock_receipt}), 200
 
-"SURRENDERED_UNITS": 250000.00,
-"CLEARANCE_STATUS": "SUCCESS_VERIFIED",
-"TREASURY_CREDIT_OUT": 250000.00,
-"TRANCHE_CLASSIFICATION": "PRIMARY_TRANCH_CURRENCY_CONVERSION",
-"SOURCE_CLEARING_NODE": EXECUTOR_ACCOUNT,
-"VAULT_DESTINATION": payload.get("recipient_usdc_address"),
-"LEDGER_SEQUENCE": 0,
-"STROOP_FEE_CONSUMED": 300,
-"BLOCKCHAIN_NETWORK": STELLAR_NETWORK,
-"COMPILER_RUNTIME": f"Python {sys.version.split()}",
-"ROUTING_INFRASTRUCTURE": SERVICE_NAME,
-"PLATFORM_HOSTNAME": HOSTNAME
-}
-print(f"\n[MONEYGRAM CORRIDOR CLEARANCE LOG]: {json.dumps(mock_receipt)}", flush=True)
-return jsonify({"status": "settled", "receipt": mock_receipt}), 200
 @app.route('/health', methods=['GET'])
 def health_check():
-return jsonify({"status": "active", "listener": "direct_horizon_sse", "network": STELLAR_NETWORK}), 200
-if name == 'main':
-t = threading.Thread(target=horizon_stream_listener, daemon=True)
-t.start()
-port = int(os.environ.get("PORT", 10000))
-app.run(host='0.0.0.0', port=port)
+    return jsonify({"status": "active", "listener": "direct_horizon_sse", "network": STELLAR_NETWORK}), 200
+
+if __name__ == '__main__':
+    t = threading.Thread(target=horizon_stream_listener, daemon=True)
+    t.start()
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
