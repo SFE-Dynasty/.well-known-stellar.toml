@@ -263,13 +263,13 @@ def execute_digital_settle():
             dest_amount=delivery_amount, path=[]
         )
 
-        tx = (TransactionBuilder(source_account=source_account, network_passphrase=Network.PUBLIC_NETWORK_PASSPHRASE, base_fee=300)
+        tx_envelope = (TransactionBuilder(source_account=source_account, network_passphrase=Network.PUBLIC_NETWORK_PASSPHRASE, base_fee=300)
               .append_operation(op_path_pay)
               .add_memo(TextMemo(EXPECTED_CONTRACT[:28]))
               .set_timeout(30).build())
 
-        tx.sign(executor_kp)
-        response = local_server.submit_transaction(tx)
+        tx_envelope.sign(executor_kp)
+        response = local_server.submit_transaction(tx_envelope)
 
         # FIXED: Assigned dynamic URL parameter to "VAULT_INTERACTIVE_PORTAL" key instead of forcing it into an on-chain destination field
         live_receipt = {
