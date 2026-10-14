@@ -289,6 +289,7 @@ def execute_digital_settle():
             "BLOCKCHAIN_NETWORK": STELLAR_NETWORK,
             "ROUTING_INFRASTRUCTURE": SERVICE_NAME
         }
+        
         print(f"\n[MONEYGRAM CORRIDOR CLEARANCE LOG]: {json.dumps(live_receipt)}", flush=True)
         return jsonify({"status": "settled", "receipt": live_receipt}), 200
     except Exception as e:
