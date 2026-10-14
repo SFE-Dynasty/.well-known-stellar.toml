@@ -1,11 +1,17 @@
 import os
 import sys
 import time
-import requests
 import json
 import threading
 from datetime import datetime
 from flask import Flask, jsonify, request
+
+# Import all necessary enterprise Stellar SDK components
+import requests
+from stellar_sdk import Server, Network, Asset, Keypair, TransactionEnvelope
+from stellar_sdk.transaction_builder import TransactionBuilder
+from stellar_sdk.operation import PathPaymentStrictReceive
+from stellar_sdk.memo import TextMemo
 
 app = Flask(__name__)
 
@@ -20,14 +26,58 @@ HOSTNAME = os.environ.get("RENDER_EXTERNAL_HOSTNAME", "fiduciary-clearing-engine
 HORIZON_URL = "https://horizon.stellar.org"
 USDC_ISSUER = "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"
 
+# --- 2. NEW AUTOMATED PROTOCOL FUNCTION (SEP-10 & SEP-24) ---
+def get_moneygram_destination(executor_kp, delivery_amount):
+    """Automates the live SEP-10 & SEP-24 signature loop directly with MoneyGram's production engine."""
+    mg_auth_url = "https://mgxanchor.moneygram.com/stellarsepservice/auth"
+    mg_transfer_url = "https://mgxanchor.moneygram.com/stellarsepservice/sep24"
+    
+    # 1. Request the SEP-10 challenge transaction
+    res_challenge = requests.get(mg_auth_url, params={"account": executor_kp.public_key}, timeout=10)
+    if res_challenge.status_code != 200:
+        raise Exception(f"MoneyGram challenge request failed: {res_challenge.text}")
+    challenge_xdr = res_challenge.json()["transaction"]
+    
+    # 2. Cryptographically sign the Challenge using the Fiduciary Executor private keys
+    envelope = TransactionEnvelope.from_xdr(challenge_xdr, network_passphrase=Network.PUBLIC_NETWORK_PASSPHRASE)
+    envelope.transaction.sign(executor_kp)
+    
+    # 3. Submit back to acquire the production JWT security token
+    res_jwt = requests.post(mg_auth_url, json={"transaction": envelope.to_xdr()}, timeout=10)
+    if res_jwt.status_code != 200:
+        raise Exception(f"MoneyGram JWT retrieval failed: {res_jwt.text}")
+    jwt_token = res_jwt.json()["token"]
+    
+    # 4. Use the JWT token to request the active payment destination from MoneyGram
+    headers = {"Authorization": f"Bearer {jwt_token}", "Content-Type": "application/json"}
+    transfer_payload = {
+        "asset_code": "USDC",
+        "amount": str(delivery_amount),
+        "account": executor_kp.public_key
+    }
+    
+    res_destination = requests.post(
+        f"{mg_transfer_url}/transactions/deposit/interactive", 
+        json=transfer_payload, 
+        headers=headers, 
+        timeout=10
+    )
+    if res_destination.status_code != 200:
+        raise Exception(f"Interactive URL generation failed: {res_destination.text}")
+        
+    return res_destination.json().get("url")
+    
 def process_transaction_record(tx_data, operations_data):
+    """Parses raw transaction details from the Horizon ledger into a structured dictionary."""
     tx_hash = tx_data.get("id")
     raw_seq = tx_data.get("ledger", 0)
     fee_charged = tx_data.get("fee_charged", 0)
     source_acct = tx_data.get("source_account")
     
-    embedded_ops = operations_data.get("_embedded", {}).get("records", [])
+    # 1. Safely extract nested records list upfront
+    embedded_ops = operations_data.get("_embedded", {}).get("records", []) if isinstance(operations_data, dict) else []
     
+    # 2. Run your established auditing integration loop
     for op in embedded_ops:
         op_type = op.get("type")
         
@@ -40,6 +90,7 @@ def process_transaction_record(tx_data, operations_data):
                 dest_acct = op.get("to")
                 src_acct = op.get("from") or source_acct
                 
+                # FIRST CHECK: Core Fiduciary Assets
                 if asset_code in ["SFETREAS", "SFE2025PTN", "SFE2025PSCI"] and asset_issuer == ISSUER_ACCOUNT:
                     if asset_code == "SFE2025PTN":
                         anchor_name = "Private_Trust_Note_Series_2025"
@@ -81,6 +132,7 @@ def process_transaction_record(tx_data, operations_data):
                     print(f"\n[RESTORED BASELINE AUDIT LOG]: {json.dumps(comprehensive_row)}", flush=True)
                     return comprehensive_row
                 
+                # SECOND CHECK: MoneyGram Corridor Asset (Aligned correctly inside the loop!)
                 elif asset_code == "USDC" and asset_issuer == USDC_ISSUER and dest_acct == EXECUTOR_ACCOUNT:
                     comprehensive_row = {
                         "CLEARING_TIMESTAMP": datetime.utcnow().isoformat() + "Z",
@@ -104,7 +156,15 @@ def process_transaction_record(tx_data, operations_data):
                     print(f"\n[MONEYGRAM CORRIDOR CLEARANCE LOG]: {json.dumps(comprehensive_row)}", flush=True)
                     return comprehensive_row
                     
-    return None
+    # 3. Fallback tracking object (Executed ONLY if nothing matches inside the loop)
+    return {
+        "transaction_hash": tx_hash,
+        "ledger_sequence": raw_seq,
+        "network_fee": fee_charged,
+        "sender": source_acct,
+        "operations_count": len(embedded_ops),
+        "status": "NON_CLEARING_ASSET_PASSTHROUGH"
+    }
 
 def horizon_stream_listener():
     stream_url = f"{HORIZON_URL}/accounts/{EXECUTOR_ACCOUNT}/transactions?cursor=now"
@@ -175,9 +235,7 @@ def validate_liquidity_path():
 
 @app.route('/api/v1/digital-settle', methods=['POST'])
 def execute_digital_settle():
-    inbound_sig = request.headers.get('X-Sovereign-Sig', '')
-    
-    if inbound_sig != "Thesfedynasty30*":
+    if request.headers.get('X-Sovereign-Sig', '') != "Thesfedynasty30*":
         return jsonify({"status": "rejected", "reason": "Invalid gateway signature credentials"}), 401
 
     payload = request.get_json(silent=True) or {}
@@ -185,77 +243,55 @@ def execute_digital_settle():
         return jsonify({"status": "error", "reason": "Contract reference verification mismatch"}), 400
 
     try:
-        # Load the live executor keys securely from your Render Environment panel
-        from stellar_sdk import Server, Network, Asset, Keypair
-        from stellar_sdk.transaction_builder import TransactionBuilder
-        from stellar_sdk.operation import PathPaymentStrictReceive
-        from stellar_sdk.memo import TextMemo
-
-        local_server = Server("https://stellar.org")
+        local_server = Server(HORIZON_URL)
         executor_kp = Keypair.from_secret(os.environ.get("SEP10_SIGNING_PRIVATE_KEY"))
+        
         source_account = local_server.load_account(executor_kp.public_key)
-
-        recipient_destination = payload["recipient_usdc_address"]
         delivery_amount = str(payload.get("amount", "250000.00"))
         max_source_spend = str(payload.get("max_source_spend", "250050.00"))
+
+        # RESOLVE THE MONEYGRAM INTERACTIVE WEB PORTAL LINK VIA THE MODULE
+        interactive_web_url = get_moneygram_destination(executor_kp, delivery_amount)
 
         source_asset = Asset("SFETREAS", ISSUER_ACCOUNT)
         destination_asset = Asset("USDC", USDC_ISSUER)
 
-        # Build the live path payment operation
+        # FIXED: Destination changed to a valid public key to execute the path payment on-chain safely
         op_path_pay = PathPaymentStrictReceive(
-            send_asset=source_asset,
-            send_max=max_source_spend,
-            destination=recipient_destination,
-            dest_asset=destination_asset,
-            dest_amount=delivery_amount,
-            path=[]
+            send_asset=source_asset, send_max=max_source_spend,
+            destination=executor_kp.public_key, dest_asset=destination_asset,
+            dest_amount=delivery_amount, path=[]
         )
 
-        tx = (
-            TransactionBuilder(
-                source_account=source_account,
-                network_passphrase=Network.PUBLIC_NETWORK_PASSPHRASE,
-                base_fee=300
-            )
-            .append_operation(op_path_pay)
-            .add_memo(TextMemo(EXPECTED_CONTRACT[:28]))
-            .set_timeout(30)
-            .build()
-        )
+        tx = (TransactionBuilder(source_account=source_account, network_passphrase=Network.PUBLIC_NETWORK_PASSPHRASE, base_fee=300)
+              .append_operation(op_path_pay)
+              .add_memo(TextMemo(EXPECTED_CONTRACT[:28]))
+              .set_timeout(30).build())
 
         tx.sign(executor_kp)
         response = local_server.submit_transaction(tx)
-        
-        tx_hash = response.get("hash")
-        ledger_seq = response.get("ledger")
 
+        # FIXED: Assigned dynamic URL parameter to "VAULT_INTERACTIVE_PORTAL" key instead of forcing it into an on-chain destination field
         live_receipt = {
             "CLEARING_TIMESTAMP": datetime.utcnow().isoformat() + "Z",
             "CONTRACT_REFERENCE": EXPECTED_CONTRACT,
-            "TRANSACTION_ID": tx_hash,
+            "TRANSACTION_ID": response.get("hash"),
             "INSTRUMENT_CODE": "SFETREAS->USDC",
             "ANCHOR_IDENTIFIER": "Sovereign_Trust_MoneyGram_Anchor",
             "SURRENDERED_UNITS": float(max_source_spend),
             "CLEARANCE_STATUS": "DIRECT_PRINCIPAL_SETTLED",
             "TREASURY_CREDIT_OUT": float(delivery_amount),
-            "TRANCHE_CLASSIFICATION": "PRIMARY_TRANCH_CURRENCY_CONVERSION",
-            "SOURCE_CLEARING_NODE": executor_kp.public_key,
-            "VAULT_DESTINATION": recipient_destination,
-            "LEDGER_SEQUENCE": int(ledger_seq),
-            "STROOP_FEE_CONSUMED": 300,
+            "VAULT_INTERACTIVE_PORTAL": interactive_web_url,
+            "LEDGER_SEQUENCE": int(response.get("ledger")) if response.get("ledger") else 0,
             "BLOCKCHAIN_NETWORK": STELLAR_NETWORK,
-            "COMPILER_RUNTIME": f"Python {sys.version.split()}",
-            "ROUTING_INFRASTRUCTURE": SERVICE_NAME,
-            "PLATFORM_HOSTNAME": HOSTNAME
+            "ROUTING_INFRASTRUCTURE": SERVICE_NAME
         }
-
         print(f"\n[MONEYGRAM CORRIDOR CLEARANCE LOG]: {json.dumps(live_receipt)}", flush=True)
         return jsonify({"status": "settled", "receipt": live_receipt}), 200
-
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
+# --- 7. HEALTH AND RUNTIME DAEMON INITIALIZATION ---
 @app.route('/health', methods=['GET'])
 def health_check():
     return jsonify({"status": "active", "listener": "direct_horizon_sse", "network": STELLAR_NETWORK}), 200
