@@ -127,7 +127,7 @@ def authorize_counterparty(counterparty_public_key: str) -> dict:
     log.info(f"Authorizing counterparty: {counterparty_public_key}")
 
     def _build_and_submit():
-        issuer_account = server.load_account(ISSUER_PUBLIC)
+        issuer_account = get_server().load_account(ISSUER_PUBLIC)
         tx = (
             TransactionBuilder(
                 source_account=issuer_account,
@@ -145,7 +145,7 @@ def authorize_counterparty(counterparty_public_key: str) -> dict:
         )
         tx.sign(ISSUER_KP)
         tx.sign(EXECUTOR_KP)
-        return server.submit_transaction(tx)
+        return get_server().submit_transaction(tx)
 
     response = with_retry(_build_and_submit)
     result = {
