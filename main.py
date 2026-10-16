@@ -60,8 +60,8 @@ POLL_INTERVAL_SECS  = 5
 MAX_RETRIES         = 5
 RETRY_BASE_DELAY    = 1.0
 
-server              = Server(HORIZON_URL)
-app                 = Flask(__name__)
+def get_server():
+    return Server(HORIZON_URL)
 
 logging.basicConfig(
     level=logging.INFO,
