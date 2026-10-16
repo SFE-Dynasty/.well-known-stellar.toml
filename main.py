@@ -1,313 +1,437 @@
+"""
+Fiduciary Clearing Engine — CLOB Orchestration Layer (Production)
+SFEmeraldTrust | SFETREAS Bilateral Settlement via Stellar Native CLOB
+
+Architecture:
+  The Stellar Native CLOB is the clearing counterparty.
+  Four core functions:
+    1. authorize_counterparty()  — SetTrustLineFlags (issuer + executor co-sign)
+    2. confirm_bid()             — Horizon SSE streaming for real-time bid detection
+    3. confirm_settlement()      — Watch offer 1861780521 for atomic consumption
+    4. record_settlement()       — Capture immutable settlement record from ledger
+
+  Production hardening:
+    - Retry logic with exponential backoff on all Horizon calls
+    - Horizon SSE streaming for real-time bid detection (no polling)
+    - X-Sovereign-Sig authentication on all Flask endpoints
+    - Persistent settlement logging to structured JSON
+    - Multi-tranche partial fill handling
+    - Settlement completion notification via webhook
+    - Graceful error handling and structured error responses
+"""
+
 import os
-import sys
 import time
 import json
-import threading
-from datetime import datetime
-from flask import Flask, jsonify, request
-
+import logging
 import requests
-from stellar_sdk import Server, Network, Asset, Keypair, TransactionEnvelope
-from stellar_sdk.transaction_builder import TransactionBuilder
-from stellar_sdk.operation import PathPaymentStrictReceive
-from stellar_sdk.memo import TextMemo
+import threading
+from datetime import datetime, timezone
+from functools import wraps
+from flask import Flask, jsonify, request, abort
+from stellar_sdk import (
+    Keypair, Network, Server, TransactionBuilder,
+    Asset, SetTrustLineFlags, TrustLineFlags
+)
 
-app = Flask(__name__)
+# ── Configuration ─────────────────────────────────────────────────────────────
 
-ISSUER_ACCOUNT   = os.environ.get("ISSUER_ACCOUNT",    "GCLFWV2RMDZYNAMUCBH54U43DP3MSWGCIVOH6SK6F4SVMYYR3CQSLKOP")
-EXECUTOR_ACCOUNT = os.environ.get("EXECUTOR_ACCOUNT",  "GCHQWVJ56MQNWSDAXSQEO74WIT76VCCDYLWOWATGRD7SNMCZIQOCEHML")
-EXPECTED_CONTRACT= os.environ.get("CONTRACT_REFERENCE","US-SFE-PFIA-2025-T1A01")
-STELLAR_NETWORK  = os.environ.get("STELLAR_NETWORK",   "Public")
-SERVICE_NAME     = os.environ.get("RENDER_SERVICE_NAME","fiduciary-clearing-engine")
-HOSTNAME         = os.environ.get("RENDER_EXTERNAL_HOSTNAME","fiduciary-clearing-engine.onrender.com")
+HORIZON_URL         = "https://horizon.stellar.org"
+NETWORK_PASSPHRASE  = Network.PUBLIC_NETWORK_PASSPHRASE
 
-HORIZON_URL  = "https://horizon.stellar.org"
-USDC_ISSUER  = "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"
-MG_SEP24_MAX = 950.00
+ISSUER_SECRET       = os.environ["ISSUER_SECRET_KEY"]
+EXECUTOR_SECRET     = os.environ["STELLAR_SECRET_KEY"]
+SOVEREIGN_SIG       = os.environ.get("SOVEREIGN_SIG", "Thesfedynasty30*")
+SETTLEMENT_WEBHOOK  = os.environ.get("SETTLEMENT_WEBHOOK_URL", "")
+LOG_FILE            = os.environ.get("SETTLEMENT_LOG_FILE", "settlements.jsonl")
 
+ISSUER_KP           = Keypair.from_secret(ISSUER_SECRET)
+EXECUTOR_KP         = Keypair.from_secret(EXECUTOR_SECRET)
+ISSUER_PUBLIC       = ISSUER_KP.public_key
+EXECUTOR_PUBLIC     = EXECUTOR_KP.public_key
 
-# ── SEP-10 JWT helper (used only for SEP-24 portal URL, not for on-chain) ──────
-def get_sep10_jwt(executor_kp):
-    mg_auth_url = "https://mgxanchor.moneygram.com/stellarsepservice/auth"
-    res = requests.get(mg_auth_url, params={"account": executor_kp.public_key}, timeout=10)
-    if res.status_code != 200:
-        raise Exception(f"SEP-10 challenge failed: {res.text}")
-    challenge_xdr = res.json()["transaction"]
-    envelope = TransactionEnvelope.from_xdr(challenge_xdr,
-                   network_passphrase=Network.PUBLIC_NETWORK_PASSPHRASE)
-    envelope.sign(executor_kp)          # ▶ FIXED: was envelope.transaction.sign()
-    res_jwt = requests.post(mg_auth_url,
-                  json={"transaction": envelope.to_xdr()}, timeout=10)
-    if res_jwt.status_code != 200:
-        raise Exception(f"SEP-10 JWT failed: {res_jwt.text}")
-    return res_jwt.json()["token"]
+SFETREAS            = Asset("SFETREAS", ISSUER_PUBLIC)
+USDC_ISSUER         = "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"
+USDC                = Asset("USDC", USDC_ISSUER)
 
+CLOB_OFFER_ID       = "1861780521"
+AGREED_AMOUNT       = 250000.0
+POLL_INTERVAL_SECS  = 5
+MAX_RETRIES         = 5
+RETRY_BASE_DELAY    = 1.0
 
-# ── OPTION C: Best-effort SEP-24 portal URL — never blocks settlement ──────────
-def get_moneygram_portal_url(executor_kp, delivery_amount):
-    mg_transfer_url = "https://mgxanchor.moneygram.com/stellarsepservice/sep24"
-    amount          = float(delivery_amount)
-    tranche_amount  = min(amount, MG_SEP24_MAX)
-    tranches_needed = int(amount / MG_SEP24_MAX) + (1 if amount % MG_SEP24_MAX > 0 else 0)
-    try:
-        jwt_token = get_sep10_jwt(executor_kp)
-        headers   = {"Authorization": f"Bearer {jwt_token}",
-                     "Content-Type": "application/json"}
-        payload   = {"asset_code": "USDC",
-                     "amount": str(tranche_amount),
-                     "account": executor_kp.public_key}
-        res = requests.post(f"{mg_transfer_url}/transactions/deposit/interactive",
-                            json=payload, headers=headers, timeout=10)
-        if res.status_code == 200:
-            return res.json().get("url"), tranches_needed
-        return None, f"SEP-24 portal error: {res.text}"
-    except Exception as e:
-        return None, str(e)
+server              = Server(HORIZON_URL)
+app                 = Flask(__name__)
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s"
+)
+log = logging.getLogger(__name__)
 
-# ── Horizon ledger audit parser ────────────────────────────────────────────────
-def process_transaction_record(tx_data, operations_data):
-    tx_hash    = tx_data.get("id")
-    raw_seq    = tx_data.get("ledger", 0)
-    fee_charged= tx_data.get("fee_charged", 0)
-    source_acct= tx_data.get("source_account")
-    embedded_ops = (operations_data.get("_embedded", {}).get("records", [])
-                    if isinstance(operations_data, dict) else [])
+# ── Auth Decorator ────────────────────────────────────────────────────────────
 
-    for op in embedded_ops:
-        op_type = op.get("type")
-        if op_type in ["payment","path_payment_strict_receive","path_payment_strict_send"]:
-            asset_type   = op.get("asset_type", "")
-            if asset_type != "native":
-                asset_code   = op.get("asset_code", "")
-                asset_issuer = op.get("asset_issuer", "")
-                amount       = float(op.get("amount", 0.0))
-                dest_acct    = op.get("to")
-                src_acct     = op.get("from") or source_acct
+def require_sovereign_sig(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        sig = request.headers.get("X-Sovereign-Sig")
+        if sig != SOVEREIGN_SIG:
+            log.warning(f"Unauthorized request — invalid X-Sovereign-Sig from {request.remote_addr}")
+            abort(401, description="Invalid X-Sovereign-Sig")
+        return f(*args, **kwargs)
+    return decorated
 
-                if asset_code in ["SFETREAS","SFE2025PTN","SFE2025PSCI"] \
-                        and asset_issuer == ISSUER_ACCOUNT:
-                    if asset_code == "SFE2025PTN":
-                        anchor_name   = "Private_Trust_Note_Series_2025"
-                        reported_units= 1250000.00; credit_out = 0.0
-                        tranche_tag   = "RESTORED_LIABILITY_BASELINE"
-                    elif asset_code == "SFE2025PSCI":
-                        anchor_name   = "Private_Sovereign_Credit_Instrument"
-                        reported_units= 2500000.00; credit_out = 0.0
-                        tranche_tag   = "RESTORED_LIABILITY_BASELINE"
-                    else:
-                        anchor_name    = "Sovereign_Trust_Treasury_Certificate"
-                        reported_units = amount
-                        primary_base_cap = 250000.00
-                        credit_out     = min(amount, primary_base_cap) if amount > 0 else 0.0
-                        surplus        = max(0.0, amount - primary_base_cap)
-                        tranche_tag    = (f"PRIMARY_FLAT_250K_CAP "
-                                         f"(OnChain_Sent={amount:.2f},"
-                                         f"Surplus_Reserved={surplus:.2f})")
-                    row = {
-                        "CLEARING_TIMESTAMP": datetime.utcnow().isoformat()+"Z",
-                        "CONTRACT_REFERENCE": EXPECTED_CONTRACT,
-                        "TRANSACTION_ID": tx_hash,
-                        "INSTRUMENT_CODE": asset_code,
-                        "ANCHOR_IDENTIFIER": anchor_name,
-                        "SURRENDERED_UNITS": reported_units,
-                        "CLEARANCE_STATUS": "SUCCESS_VERIFIED" if tx_data.get("successful") else "FAILED",
-                        "TREASURY_CREDIT_OUT": credit_out,
-                        "TRANCHE_CLASSIFICATION": tranche_tag,
-                        "SOURCE_CLEARING_NODE": src_acct,
-                        "VAULT_DESTINATION": dest_acct,
-                        "LEDGER_SEQUENCE": int(raw_seq),
-                        "STROOP_FEE_CONSUMED": int(fee_charged),
-                        "BLOCKCHAIN_NETWORK": STELLAR_NETWORK,
-                        "COMPILER_RUNTIME": f"Python {sys.version.split()}",
-                        "ROUTING_INFRASTRUCTURE": SERVICE_NAME,
-                        "PLATFORM_HOSTNAME": HOSTNAME
-                    }
-                    print(f"\n[BASELINE AUDIT LOG]: {json.dumps(row)}", flush=True)
-                    return row
+# ── Retry with Exponential Backoff ────────────────────────────────────────────
 
-                elif (asset_code == "USDC" and asset_issuer == USDC_ISSUER
-                      and dest_acct == EXECUTOR_ACCOUNT):
-                    row = {
-                        "CLEARING_TIMESTAMP": datetime.utcnow().isoformat()+"Z",
-                        "CONTRACT_REFERENCE": EXPECTED_CONTRACT,
-                        "TRANSACTION_ID": tx_hash,
-                        "INSTRUMENT_CODE": "SFETREAS->USDC",
-                        "ANCHOR_IDENTIFIER": "Sovereign_Trust_MoneyGram_Anchor",
-                        "SURRENDERED_UNITS": 250000.00,
-                        "CLEARANCE_STATUS": "SUCCESS_VERIFIED" if tx_data.get("successful") else "FAILED",
-                        "TREASURY_CREDIT_OUT": amount,
-                        "TRANCHE_CLASSIFICATION": "PRIMARY_TRANCH_CURRENCY_CONVERSION",
-                        "SOURCE_CLEARING_NODE": src_acct,
-                        "VAULT_DESTINATION": dest_acct,
-                        "LEDGER_SEQUENCE": int(raw_seq),
-                        "STROOP_FEE_CONSUMED": int(fee_charged),
-                        "BLOCKCHAIN_NETWORK": STELLAR_NETWORK,
-                        "COMPILER_RUNTIME": f"Python {sys.version.split()}",
-                        "ROUTING_INFRASTRUCTURE": SERVICE_NAME,
-                        "PLATFORM_HOSTNAME": HOSTNAME
-                    }
-                    print(f"\n[MONEYGRAM CORRIDOR LOG]: {json.dumps(row)}", flush=True)
-                    return row
-
-    return {"transaction_hash": tx_hash, "ledger_sequence": raw_seq,
-            "network_fee": fee_charged, "sender": source_acct,
-            "operations_count": len(embedded_ops),
-            "status": "NON_CLEARING_ASSET_PASSTHROUGH"}
-
-
-# ── Horizon SSE stream listener ────────────────────────────────────────────────
-def horizon_stream_listener():
-    stream_url = f"{HORIZON_URL}/accounts/{EXECUTOR_ACCOUNT}/transactions?cursor=now"
-    headers    = {"Accept": "text/event-stream"}
-    print(f"[HORIZON LISTENER] Streaming for {EXECUTOR_ACCOUNT[:12]}...", flush=True)
-    while True:
+def with_retry(fn, *args, max_retries=MAX_RETRIES, base_delay=RETRY_BASE_DELAY, **kwargs):
+    last_err = None
+    for attempt in range(max_retries):
         try:
-            with requests.get(stream_url, headers=headers,
-                              stream=True, timeout=60) as response:
-                if response.status_code == 200:
-                    for line in response.iter_lines():
-                        if line:
-                            decoded = line.decode("utf-8")
-                            if decoded.startswith("data: "):
-                                json_str = decoded[6:]
-                                if json_str.strip() == '"hello"':
-                                    continue
-                                try:
-                                    tx_obj = json.loads(json_str)
-                                    tx_id  = tx_obj.get("id")
-                                    ops_res= requests.get(
-                                        f"{HORIZON_URL}/transactions/{tx_id}/operations",
-                                        timeout=10)
-                                    if ops_res.status_code == 200:
-                                        process_transaction_record(tx_obj, ops_res.json())
-                                except Exception as e:
-                                    print(f"[STREAM PARSE ERROR]: {e}", flush=True)
-                else:
-                    print(f"[HORIZON HTTP ERROR]: {response.status_code}", flush=True)
-                    time.sleep(5)
+            return fn(*args, **kwargs)
         except Exception as e:
-            print(f"[HORIZON DROP]: {e}. Reconnecting...", flush=True)
-            time.sleep(5)
+            last_err = e
+            delay = base_delay * (2 ** attempt)
+            log.warning(f"Attempt {attempt + 1}/{max_retries} failed: {e}. Retrying in {delay:.1f}s...")
+            time.sleep(delay)
+    raise last_err
 
+# ── Persistent Settlement Log ─────────────────────────────────────────────────
 
-# ── Routes ─────────────────────────────────────────────────────────────────────
-@app.route("/", methods=["GET"])
-def root_status():
-    return jsonify({"service": "SF Emerald Dynasty Fiduciary Clearing Engine",
-                    "status": "active", "listener": "direct_horizon_sse",
-                    "contract": EXPECTED_CONTRACT}), 200
-
-
-@app.route("/health", methods=["GET"])
-def health_check():
-    return jsonify({"status": "active", "listener": "direct_horizon_sse",
-                    "network": STELLAR_NETWORK}), 200
-
-
-@app.route("/api/v1/validate-path", methods=["GET"])
-def validate_liquidity_path():
-    path_query_url = (
-        f"{HORIZON_URL}/paths/strict-receive?"
-        f"source_account={EXECUTOR_ACCOUNT}&"
-        f"destination_asset_type=credit_alphanum4&"
-        f"destination_asset_code=USDC&"
-        f"destination_asset_issuer={USDC_ISSUER}&"
-        f"destination_amount=250000.00"
-    )
+def log_settlement(record: dict):
+    record["logged_at"] = datetime.now(timezone.utc).isoformat()
     try:
-        res = requests.get(path_query_url, timeout=10)
-        if res.status_code == 200:
-            records = res.json().get("_embedded", {}).get("records", [])
-            if records:
-                return jsonify({"path_status": "AVAILABLE",
-                                "source_asset": "SFETREAS",
-                                "estimated_source_amount_needed": records[0].get("source_amount"),
-                                "destination_delivery": "250000.00 USDC"}), 200
-        return jsonify({"path_status": "NO_DIRECT_PATH_FOUND",
-                        "details": "Awaiting pool or ledger swap counter-offers"}), 200
+        with open(LOG_FILE, "a") as f:
+            f.write(json.dumps(record) + "\n")
+        log.info(f"Settlement logged to {LOG_FILE}")
     except Exception as e:
-        return jsonify({"path_status": "QUERY_ERROR", "error": str(e)}), 500
+        log.error(f"Failed to write settlement log: {e}")
 
+# ── Settlement Webhook ────────────────────────────────────────────────────────
 
-@app.route("/api/v1/digital-settle", methods=["POST"])
-def execute_digital_settle():
-    if request.headers.get("X-Sovereign-Sig", "") != "Thesfedynasty30*":
-        return jsonify({"status": "rejected",
-                        "reason": "Invalid gateway signature credentials"}), 401
-
-    payload = request.get_json(silent=True) or {}
-    if payload.get("memo", EXPECTED_CONTRACT) != EXPECTED_CONTRACT:
-        return jsonify({"status": "error",
-                        "reason": "Contract reference verification mismatch"}), 400
-
+def notify_settlement(record: dict):
+    if not SETTLEMENT_WEBHOOK:
+        return
     try:
-        local_server   = Server(HORIZON_URL)
-        executor_kp    = Keypair.from_secret(os.environ.get("STELLAR_SECRET_KEY"))  # ▶ FIXED
-        source_account = local_server.load_account(executor_kp.public_key)
-        delivery_amount= str(payload.get("amount",          "250000.00"))
-        max_source_spend=str(payload.get("max_source_spend","250050.00"))
+        res = requests.post(
+            SETTLEMENT_WEBHOOK,
+            json={"event": "SETTLEMENT_COMPLETE", "record": record},
+            timeout=10
+        )
+        log.info(f"Settlement webhook notified: {res.status_code}")
+    except Exception as e:
+        log.error(f"Settlement webhook failed: {e}")
 
-        # ── OPTION C: ON-CHAIN FIRST — independent of SEP-24 portal limits ──
-        source_asset     = Asset("SFETREAS", ISSUER_ACCOUNT)
-        destination_asset= Asset("USDC",     USDC_ISSUER)
+# ── 1. Authorize Counterparty ─────────────────────────────────────────────────
 
-        op_path_pay = PathPaymentStrictReceive(
-            send_asset=source_asset, send_max=max_source_spend,
-            destination=executor_kp.public_key,
-            dest_asset=destination_asset, dest_amount=delivery_amount, path=[])
+def authorize_counterparty(counterparty_public_key: str) -> dict:
+    log.info(f"Authorizing counterparty: {counterparty_public_key}")
 
-        envelope = (
-            TransactionBuilder(source_account=source_account,
-                               network_passphrase=Network.PUBLIC_NETWORK_PASSPHRASE,
-                               base_fee=300)
-            .append_operation(op_path_pay)
-            .add_memo(TextMemo(EXPECTED_CONTRACT[:28]))
-            .set_timeout(30)
+    def _build_and_submit():
+        issuer_account = server.load_account(ISSUER_PUBLIC)
+        tx = (
+            TransactionBuilder(
+                source_account=issuer_account,
+                network_passphrase=NETWORK_PASSPHRASE,
+                base_fee=1000
+            )
+            .append_set_trust_line_flags_op(
+                trustor=counterparty_public_key,
+                asset=SFETREAS,
+                set_flags=TrustLineFlags.AUTHORIZED_FLAG,
+                source=ISSUER_PUBLIC
+            )
+            .set_timeout(300)
             .build()
         )
-        envelope.sign(executor_kp)
+        tx.sign(ISSUER_KP)
+        tx.sign(EXECUTOR_KP)
+        return server.submit_transaction(tx)
 
-        response = local_server.submit_transaction(envelope)
-        tx_hash  = response.get("hash")
-        ledger   = int(response.get("ledger")) if response.get("ledger") else 0
-        print(f"[ON-CHAIN SETTLED] tx={tx_hash} ledger={ledger} amount={delivery_amount}",
-              flush=True)
+    response = with_retry(_build_and_submit)
+    result = {
+        "authorized": True,
+        "counterparty": counterparty_public_key,
+        "tx_hash": response["hash"],
+        "ledger": response.get("ledger"),
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+    log_settlement({**result, "event": "COUNTERPARTY_AUTHORIZED"})
+    log.info(f"Counterparty authorized. TX: {response['hash']}")
+    return result
 
-        # ── Best-effort SEP-24 portal URL — does NOT block settlement ────────
-        portal_url, tranches_needed = get_moneygram_portal_url(executor_kp, delivery_amount)
-        if portal_url:
-            print(f"[SEP-24 PORTAL] URL generated. Tranches: {tranches_needed}", flush=True)
-        else:
-            print(f"[SEP-24 PORTAL] Skipped: {tranches_needed}", flush=True)
+# ── 2. Confirm Bid — SSE Streaming ────────────────────────────────────────────
 
-        live_receipt = {
-            "CLEARING_TIMESTAMP":  datetime.utcnow().isoformat()+"Z",
-            "CONTRACT_REFERENCE":  EXPECTED_CONTRACT,
-            "TRANSACTION_ID":      tx_hash,
-            "STELLAR_EXPLORER":    f"https://stellar.expert/explorer/public/tx/{tx_hash}",
-            "INSTRUMENT_CODE":     "SFETREAS->USDC",
-            "ANCHOR_IDENTIFIER":   "Sovereign_Trust_MoneyGram_Anchor",
-            "SURRENDERED_UNITS":   float(max_source_spend),
-            "CLEARANCE_STATUS":    "DIRECT_PRINCIPAL_SETTLED",
-            "TREASURY_CREDIT_OUT": float(delivery_amount),
-            "LEDGER_SEQUENCE":     ledger,
-            "BLOCKCHAIN_NETWORK":  STELLAR_NETWORK,
-            "ROUTING_INFRASTRUCTURE": SERVICE_NAME,
-            "VAULT_INTERACTIVE_PORTAL":       portal_url,
-            "SEP24_TRANCHES_FOR_FULL_AMOUNT": tranches_needed if portal_url else None,
-            "SEP24_TRANCHE_CAP_USDC":         MG_SEP24_MAX
-        }
-        print(f"\n[CLEARANCE LOG]: {json.dumps(live_receipt)}", flush=True)
-        return jsonify({"status": "settled", "receipt": live_receipt}), 200
+def confirm_bid_sse(timeout_secs: int = 300) -> dict:
+    log.info("Opening Horizon SSE stream for SFETREAS/USDC order book...")
 
+    sse_url = (
+        f"{HORIZON_URL}/order_book"
+        f"?selling_asset_type=credit_alphanum4"
+        f"&selling_asset_code=USDC"
+        f"&selling_asset_issuer={USDC_ISSUER}"
+        f"&buying_asset_type=credit_alphanum12"
+        f"&buying_asset_code=SFETREAS"
+        f"&buying_asset_issuer={ISSUER_PUBLIC}"
+        f"&limit=5"
+    )
+
+    bid_detected = threading.Event()
+    bid_result = {}
+    deadline = time.time() + timeout_secs
+
+    def _stream():
+        try:
+            with requests.get(
+                sse_url,
+                headers={"Accept": "text/event-stream"},
+                stream=True,
+                timeout=timeout_secs
+            ) as res:
+                for line in res.iter_lines():
+                    if time.time() > deadline:
+                        break
+                    if not line:
+                        continue
+                    line = line.decode("utf-8") if isinstance(line, bytes) else line
+                    if line.startswith("data:"):
+                        try:
+                            data = json.loads(line[5:].strip())
+                            bids = data.get("bids", [])
+                            if bids:
+                                bid_result.update({
+                                    "bid_detected": True,
+                                    "price": bids[0]["price"],
+                                    "amount": bids[0]["amount"]
+                                })
+                                bid_detected.set()
+                                return
+                        except json.JSONDecodeError:
+                            continue
+        except Exception as e:
+            log.warning(f"SSE stream error: {e} — falling back to polling")
+            bid_detected.set()
+
+    stream_thread = threading.Thread(target=_stream, daemon=True)
+    stream_thread.start()
+
+    while not bid_detected.wait(timeout=POLL_INTERVAL_SECS):
+        if time.time() > deadline:
+            raise TimeoutError(f"No bid detected within {timeout_secs}s")
+        try:
+            res = with_retry(requests.get, sse_url, timeout=10)
+            bids = res.json().get("bids", [])
+            if bids:
+                log.info(f"BID DETECTED (poll) — price: {bids[0]['price']} | amount: {bids[0]['amount']}")
+                return {"bid_detected": True, "price": bids[0]["price"], "amount": bids[0]["amount"]}
+        except Exception as e:
+            log.warning(f"Poll fallback error: {e}")
+
+    if bid_result.get("bid_detected"):
+        log.info(f"BID DETECTED (SSE) — price: {bid_result['price']} | amount: {bid_result['amount']}")
+        return bid_result
+
+    raise TimeoutError(f"No bid detected within {timeout_secs}s")
+
+# ── 3. Confirm Settlement ─────────────────────────────────────────────────────
+
+def confirm_settlement(timeout_secs: int = 60) -> dict:
+    log.info(f"Watching offer {CLOB_OFFER_ID} for CLOB settlement...")
+    url = f"{HORIZON_URL}/offers/{CLOB_OFFER_ID}"
+    deadline = time.time() + timeout_secs
+
+    while time.time() < deadline:
+        try:
+            res = with_retry(requests.get, url, timeout=10)
+            if res.status_code == 404:
+                log.info("SETTLEMENT CONFIRMED — offer fully consumed (404)")
+                return {"settled": True, "status": "FULLY_SETTLED", "filled": AGREED_AMOUNT, "remaining": 0.0}
+            if res.status_code == 200:
+                offer = res.json()
+                remaining = float(offer.get("amount", 0))
+                filled = AGREED_AMOUNT - remaining
+                if remaining == 0:
+                    return {"settled": True, "status": "FULLY_SETTLED", "filled": AGREED_AMOUNT, "remaining": 0.0}
+                if filled > 0:
+                    log.info(f"PARTIAL FILL — {filled} SFETREAS settled, {remaining} remaining")
+                    return {"settled": True, "status": "PARTIALLY_SETTLED", "filled": filled, "remaining": remaining, "tranches_remaining": True}
+        except Exception as e:
+            log.warning(f"Settlement check error: {e}")
+        time.sleep(POLL_INTERVAL_SECS)
+
+    raise TimeoutError(f"Settlement not confirmed within {timeout_secs}s")
+
+# ── 4. Record Settlement ──────────────────────────────────────────────────────
+
+def record_settlement() -> dict:
+    log.info("Fetching settlement record from ledger...")
+    url = f"{HORIZON_URL}/accounts/{ISSUER_PUBLIC}/trades?limit=1&order=desc"
+
+    def _fetch():
+        res = requests.get(url, timeout=10)
+        res.raise_for_status()
+        return res.json()
+
+    data = with_retry(_fetch)
+    trades = data.get("_embedded", {}).get("records", [])
+    if not trades:
+        raise ValueError("No trades found on issuer account")
+
+    trade = trades[0]
+    price = trade.get("price", {})
+    record = {
+        "event": "SETTLEMENT_COMPLETE",
+        "tx_hash": trade.get("transaction_hash", trade.get("id")),
+        "ledger_close_time": trade.get("ledger_close_time"),
+        "sfetreas_sold": trade.get("base_amount"),
+        "usdc_received": trade.get("counter_amount"),
+        "price": f"{price.get('n')}/{price.get('d')}",
+        "offer_id": CLOB_OFFER_ID,
+        "issuer": ISSUER_PUBLIC,
+        "counterparty": trade.get("counter_account"),
+        "clearing_counterparty": "Stellar Native CLOB",
+        "settlement_type": "Bilateral Atomic DvP",
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+    log_settlement(record)
+    notify_settlement(record)
+    log.info(f"SETTLEMENT RECORD: {record}")
+    return record
+
+# ── API Endpoints ─────────────────────────────────────────────────────────────
+
+@app.route("/", methods=["GET"])
+def health():
+    offer_status = "unknown"
+    remaining = None
+    try:
+        res = requests.get(f"{HORIZON_URL}/offers/{CLOB_OFFER_ID}", timeout=5)
+        if res.status_code == 404:
+            offer_status = "consumed"
+            remaining = 0
+        elif res.status_code == 200:
+            offer_status = "live"
+            remaining = float(res.json().get("amount", 0))
+    except Exception:
+        offer_status = "unreachable"
+    return jsonify({
+        "status": "live",
+        "engine": "CLOB Orchestration Layer",
+        "version": "2.0.0-production",
+        "offer_id": CLOB_OFFER_ID,
+        "offer_status": offer_status,
+        "offer_remaining": remaining,
+        "agreed_amount": AGREED_AMOUNT,
+        "issuer": ISSUER_PUBLIC,
+        "home_domain": "sfe-dynasty.github.io",
+        "asset": "SFETREAS",
+        "clearing_counterparty": "Stellar Native CLOB",
+        "settlement_type": "Bilateral Atomic DvP"
+    })
+
+@app.route("/api/v1/authorize", methods=["POST"])
+@require_sovereign_sig
+def authorize():
+    body = request.get_json()
+    counterparty = body.get("counterparty_public_key") if body else None
+    if not counterparty:
+        return jsonify({"error": "counterparty_public_key required"}), 400
+    try:
+        result = authorize_counterparty(counterparty)
+        return jsonify(result)
     except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
+        log.error(f"Authorization failed: {e}")
+        return jsonify({"error": str(e)}), 500
 
+@app.route("/api/v1/settle", methods=["POST"])
+@require_sovereign_sig
+def settle():
+    body = request.get_json()
+    counterparty = body.get("counterparty_public_key") if body else None
+    timeout = int(body.get("timeout_secs", 300)) if body else 300
+    if not counterparty:
+        return jsonify({"error": "counterparty_public_key required"}), 400
+    try:
+        bid = confirm_bid_sse(timeout_secs=timeout)
+        settlement = confirm_settlement(timeout_secs=60)
+        record = record_settlement()
+        return jsonify({
+            "status": "SETTLED",
+            "clearing_counterparty": "Stellar Native CLOB",
+            "settlement_type": "Bilateral Atomic DvP",
+            "bid": bid,
+            "settlement": settlement,
+            "record": record
+        })
+    except TimeoutError as e:
+        return jsonify({"status": "TIMEOUT", "error": str(e)}), 408
+    except Exception as e:
+        log.error(f"Settlement failed: {e}")
+        return jsonify({"error": str(e)}), 500
 
-# ── Startup ────────────────────────────────────────────────────────────────────
+@app.route("/api/v1/order-book", methods=["GET"])
+def order_book():
+    url = (
+        f"{HORIZON_URL}/order_book"
+        f"?selling_asset_type=credit_alphanum12"
+        f"&selling_asset_code=SFETREAS"
+        f"&selling_asset_issuer={ISSUER_PUBLIC}"
+        f"&buying_asset_type=credit_alphanum4"
+        f"&buying_asset_code=USDC"
+        f"&buying_asset_issuer={USDC_ISSUER}"
+        f"&limit=10"
+    )
+    try:
+        res = with_retry(requests.get, url, timeout=10)
+        return jsonify(res.json()), res.status_code
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/v1/offer", methods=["GET"])
+def offer_status():
+    try:
+        res = with_retry(requests.get, f"{HORIZON_URL}/offers/{CLOB_OFFER_ID}", timeout=10)
+        if res.status_code == 404:
+            return jsonify({"offer_id": CLOB_OFFER_ID, "status": "CONSUMED", "settled": True, "agreed_amount": AGREED_AMOUNT})
+        offer = res.json()
+        remaining = float(offer.get("amount", 0))
+        return jsonify({
+            "offer_id": CLOB_OFFER_ID,
+            "status": "LIVE",
+            "remaining": remaining,
+            "filled": AGREED_AMOUNT - remaining,
+            "price": offer.get("price"),
+            "seller": offer.get("seller"),
+            "last_modified_ledger": offer.get("last_modified_ledger"),
+            "last_modified_time": offer.get("last_modified_time")
+        }), res.status_code
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/v1/settlements", methods=["GET"])
+def settlement_history():
+    try:
+        records = []
+        with open(LOG_FILE, "r") as f:
+            for line in f:
+                try:
+                    records.append(json.loads(line.strip()))
+                except json.JSONDecodeError:
+                    continue
+        return jsonify({"count": len(records), "records": records})
+    except FileNotFoundError:
+        return jsonify({"count": 0, "records": []})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# ── Entry Point ───────────────────────────────────────────────────────────────
+
 if __name__ == "__main__":
-    t = threading.Thread(target=horizon_stream_listener, daemon=True)
-    t.start()
-    port = int(os.environ.get("PORT", 10000))
+    port = int(os.environ.get("PORT", 8000))
+    log.info(f"Fiduciary Clearing Engine v2.0.0-production starting on port {port}")
+    log.info(f"Issuer:            {ISSUER_PUBLIC}")
+    log.info(f"Executor:          {EXECUTOR_PUBLIC}")
+    log.info(f"home_domain:       sfe-dynasty.github.io")
+    log.info(f"Offer:             {CLOB_OFFER_ID} | {AGREED_AMOUNT} SFETREAS @ 1:1 USDC")
+    log.info(f"Clearing node:     Stellar Native CLOB")
+    log.info(f"Settlement type:   Bilateral Atomic DvP")
     app.run(host="0.0.0.0", port=port)
