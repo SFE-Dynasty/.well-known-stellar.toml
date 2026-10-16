@@ -317,7 +317,7 @@ def health():
     return jsonify({
         "status": "live",
         "engine": "CLOB Orchestration Layer",
-        "version": "2.0.0-production",
+        "version": "2.0.1-production",
         "offer_id": CLOB_OFFER_ID,
         "offer_status": offer_status,
         "offer_remaining": remaining,
