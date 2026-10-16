@@ -329,6 +329,10 @@ def health():
         "settlement_type": "Bilateral Atomic DvP"
     })
 
+@app.route("/health", methods=["GET"])
+def health_check():
+    return jsonify({"status": "ok"}), 200
+  
 @app.route("/api/v1/authorize", methods=["POST"])
 @require_sovereign_sig
 def authorize():
