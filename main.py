@@ -511,49 +511,70 @@ def ach():
 
 @app.route("/transmit", methods=["POST"])
 def transmit():
-    """Authenticate and log a signed ACH transmission manifest from the executor keypair."""
+    """Authenticate and cryptographically verify a signed ACH transmission manifest from the executor keypair."""
+    import base64
     data = request.get_json(silent=True) or {}
-    executor_pub = data.get("executorPublicKey", "")
-    signature    = data.get("signature", "")
-    manifest_str = data.get("manifest", "")
-    # Verify the executor public key matches the known GCHQ executor
-    expected_executor = EXECUTOR_PUBLIC
-    key_match = (executor_pub == expected_executor)
-    log.info(f"[TRANSMIT] Executor={executor_pub} | KeyMatch={key_match} | SigLen={len(signature)}")
-    if not key_match:
-        log.warning(f"[TRANSMIT] Executor key mismatch — expected {expected_executor}, got {executor_pub}")
+    executor_pub  = data.get("executorPublicKey", "")
+    signature_b64 = data.get("signature", "")
+    manifest_str  = data.get("manifest", "")
+
+    # Step 1: Verify executor public key matches known GCHQ executor
+    if executor_pub != EXECUTOR_PUBLIC:
+        log.warning(f"[TRANSMIT] Executor key mismatch — expected {EXECUTOR_PUBLIC}, got {executor_pub}")
         return jsonify({
             "status": "rejected",
             "reason": "executor_key_mismatch",
-            "expected": expected_executor,
+            "expected": EXECUTOR_PUBLIC,
             "received": executor_pub
         }), 403
+
+    # Step 2: Cryptographic signature verification using Stellar SDK
+    try:
+        manifest_bytes  = manifest_str.encode("utf-8")
+        signature_bytes = base64.b64decode(signature_b64)
+        executor_kp     = Keypair.from_public_key(executor_pub)
+        executor_kp.verify(manifest_bytes, signature_bytes)
+        log.info(f"[TRANSMIT] Signature cryptographically verified — executor {executor_pub[:12]}...")
+    except Exception as e:
+        log.warning(f"[TRANSMIT] Signature verification failed: {e}")
+        return jsonify({
+            "status": "rejected",
+            "reason": "invalid_signature",
+            "detail": str(e)
+        }), 401
+
+    # Step 3: Parse manifest and log settlement record
     try:
         manifest = json.loads(manifest_str) if manifest_str else {}
     except Exception:
         manifest = {}
+
     log_settlement({
         "event": "TRANSMISSION_AUTHORIZED",
         "executorPublicKey": executor_pub,
-        "signature": signature[:32] + "...",
+        "signature": signature_b64[32] + "...",
+        "signatureVerified": True,
         "uetr": manifest.get("uetr", ""),
         "dti": manifest.get("dti", ""),
         "amount": manifest.get("amount", ""),
         "amountFormatted": manifest.get("amountFormatted", ""),
         "stellarTxHash": manifest.get("stellarTxHash", ""),
+        "stellarLedger": manifest.get("stellarLedger", ""),
         "framework": "US-SFE-PFIA-2025-T1A01"
     })
+
     return jsonify({
         "status": "transmitted",
         "executorPublicKey": executor_pub,
-        "signature": signature[:32] + "...",
+        "signatureVerified": True,
+        "signature": signature_b64[:32] + "...",
         "uetr": manifest.get("uetr", ""),
         "dti": manifest.get("dti", ""),
         "amount": manifest.get("amountFormatted", ""),
-        "message": "ACH transmission authorized — executor keypair signature verified. Chain of custody: Stellar ledger -> CLOB DvP -> pacs.008 -> ACH -> authenticated transmission."
+        "message": "ACH transmission authorized — executor keypair signature cryptographically verified. Chain of custody: Stellar ledger to CLOB DvP to pacs.008 to ACH to authenticated transmission."
     }), 200
 
-# ── Entry Point ───────────────────────────────────────────────────────────────
+# ── Entry Point ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
@@ -565,4 +586,3 @@ if __name__ == "__main__":
     log.info(f"Clearing node:     Stellar Native CLOB")
     log.info(f"Settlement type:   Bilateral Atomic DvP")
     app.run(host="0.0.0.0", port=port)
-
