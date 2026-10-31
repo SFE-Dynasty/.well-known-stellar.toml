@@ -1,0 +1,56 @@
+use_default_settings: true
+
+general:
+  debug: false
+  instance_name: "DAO Treasury Search"
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  default_lang: "en"
+  formats:
+    - html
+    - json
+
+server:
+  secret_key: "dao-treasury-search-relay-2025"
+  bind_address: "127.0.0.1"
+  port: 8888
+  base_url: "http://localhost:8888"
+  image_proxy: false
+
+ui:
+  static_use_hash: false
+
+engines:
+  - name: google
+    engine: google
+    shortcut: g
+    use_mobile_ui: false
+
+  - name: bing
+    engine: bing
+    shortcut: b
+
+  - name: duckduckgo
+    engine: duckduckgo
+    shortcut: d
+
+  - name: wikipedia
+    engine: wikipedia
+    shortcut: w
+    base_url: "https://en.wikipedia.org/"
+
+  - name: google news
+    engine: google_news
+    shortcut: gn
+
+  - name: bing news
+    engine: bing_news
+    shortcut: bn
+
+outgoing:
+  request_timeout: 10.0
+  useragent_suffix: ""
+  pool_connections: 100
+  pool_maxsize: 20

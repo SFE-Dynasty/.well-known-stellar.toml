@@ -2,3 +2,6 @@ Flask==3.0.3
 gunicorn==22.0.0
 requests==2.31.0
 stellar-sdk==16.1.0
+beautifulsoup4==4.12.3
+lxml==5.2.1
+searxng==2024.1.14
