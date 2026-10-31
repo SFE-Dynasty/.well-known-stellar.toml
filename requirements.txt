@@ -3,5 +3,5 @@ gunicorn==22.0.0
 requests==2.31.0
 stellar-sdk==16.1.0
 beautifulsoup4==4.12.3
-lxml==5.2.1
-searxng==2024.1.14
+lxml==5.3.0
+git+https://github.com/searxng/searxng.git@master#egg=searxng
