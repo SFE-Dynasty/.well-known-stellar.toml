@@ -12,18 +12,18 @@ RUN apt-get update && apt-get install -y \
 # Upgrade pip
 RUN pip install --upgrade pip
 
-# CRITICAL: install msgspec FIRST before SearXNG — SearXNG's setup.py imports it at build time
-RUN pip install msgspec==0.18.6
+# Install msgspec and other build-time dependencies FIRST
+RUN pip install msgspec==0.18.6 httpx==0.27.0 babel==2.14.0
 
 # Set working directory
 WORKDIR /app
 
-# Copy and install remaining requirements (excluding searxng — installed separately below)
+# Copy and install remaining requirements
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
-# Install SearXNG from git AFTER msgspec is available
-RUN pip install git+https://github.com/searxng/searxng.git@master#egg=searxng
+# Install SearXNG with --no-build-isolation so it can see pre-installed msgspec
+RUN pip install --no-build-isolation git+https://github.com/searxng/searxng.git@master#egg=searxng
 
 # Copy app files
 COPY . .
