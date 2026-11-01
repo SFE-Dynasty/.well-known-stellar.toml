@@ -12,17 +12,48 @@ RUN apt-get update && apt-get install -y \
 # Upgrade pip
 RUN pip install --upgrade pip
 
-# Install msgspec and other build-time dependencies FIRST
-RUN pip install msgspec==0.18.6 httpx==0.27.0 babel==2.14.0
+# Pre-install ALL known SearXNG build-time and runtime dependencies
+# so setup.py can import them during metadata generation
+RUN pip install \
+    msgspec==0.18.6 \
+    PyYAML==6.0.1 \
+    babel==2.14.0 \
+    httpx==0.27.0 \
+    httpcore==1.0.5 \
+    certifi \
+    h11 \
+    anyio \
+    sniffio \
+    idna \
+    uvloop \
+    redis \
+    flask \
+    jinja2 \
+    markupsafe \
+    werkzeug \
+    itsdangerous \
+    click \
+    blinker \
+    lxml==5.2.2 \
+    requests \
+    urllib3 \
+    charset-normalizer \
+    python-dateutil \
+    six \
+    pygments \
+    markdown-it-py \
+    mdurl \
+    rich \
+    typing-extensions
 
 # Set working directory
 WORKDIR /app
 
-# Copy and install remaining requirements
+# Copy and install app requirements
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
-# Install SearXNG with --no-build-isolation so it can see pre-installed msgspec
+# Install SearXNG with --no-build-isolation so it sees all pre-installed deps
 RUN pip install --no-build-isolation git+https://github.com/searxng/searxng.git@master#egg=searxng
 
 # Copy app files
