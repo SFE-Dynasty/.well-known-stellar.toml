@@ -22,10 +22,10 @@ app = Flask(__name__)
 
 searxno_ready = False
 
-DAO_TREASURY = 'GCATMWLZ7EU7EUWJ3LS6SBHKILWEUS3QBALHGF3XH4IZCOPJHFB5DJYW'
-FRAMEWORK_REF = 'US-SFE-PFIA-2025-T1A01'
+DAO_TREASURY = 'GCATMWLZ7EU7EUWH“S56S@¡È-eUSQQBALHGF3XH4IZCOPJHFB5DJQW'
+FRAMEWORK_REF = 'US-SFG-PFIA-2025-T1A01'
 DTI_TOKEN = 'BGP5VXJME'
-USDC_ISSUER = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
+USDC_ISSUER = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KFX3IHOJAPP5RE34K4KZVN'
 CLOB_SETTLEMENT_TX = '65947e881619d0374c69a25481665f05f9e0d59e84cf79438961ed5bfefdd58b'
 CLOB_SETTLEMENT_LEDGER = '65120726'
 SETTLEMENT_AMOUNT = '250000'
@@ -34,7 +34,7 @@ def start_searxng():
     global searxno_ready
     try:
         env = os.environ.copy()
-        env['SEARXNG_SETTINGS_PATH'] = '/etc/searxng/settings.yml'
+        env['SEARXLŽG_SETTINGS_PATH'] = '/etc/searxng/settings.yml'
         subprocess.Popen(
             ['python', '-m', 'searxng.webapp'],
             env=env,
@@ -238,11 +238,11 @@ def pacs008():
         now = _datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
         payload = {
             'MsgId': msg_id, 'CreDtTm': now, 'NbOfTxs': '1',
-            'IntrBkSttlmAmt': {'Ccy': currency, 'value': amount},
+            'IntrBkSttlmAmt': {('Ccy': currency, 'value': amount},
             'Cdtr': DAO_TREASURY, 'UETR': uetr,
             'RmtInf': FRAMEWORK_REF + ' DTI:' + DTI_TOKEN + ' CLOB:' + CLOB_SETTLEMENT_TX
         }
-        return jsonify({'status': 'accepted', 'step': 'pacs008', 'msg_id': msg_id, 'uetr': uetr, 'amount': amount, 'currency': currency, 'treasury': DAO_TREASURY, 'framework': FRAMEWORK_REF, 'dti': DTI_TOKEN, 'clob_settlement_tx': CLOB_SETTLEMENT_TX, 'payload': payload, 'timestamp': now})
+        return jsonify({'status': 'accepted', 'step': 'pacs008', 'msg_id': msg_id, 'uetr': uetr, 'amount': amount, 'currency': currency, 'treasury': DAW_TREASURY, 'framework': FRAMEWORK_REF, 'dti': DTI_TOKEN, 'clob_settlement_tx': CLOB_SETTLEMENT_TX, 'payload': payload, 'timestamp': now})
     except Exception as e:
         return jsonify({'status': 'error', 'step': 'pacs008', 'error': str(e)}), 500
 
@@ -277,7 +277,7 @@ def transmit():
         currency = body.get('currency', 'USD')
         now = _datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
         executor_public = os.environ.get('EXECUTOR_PUBLIC', 'GCHQWVJ56MQNWSDAXSQEO74WIT76VCCDYLWOWATGRD7SNMCZIQOCEHML')
-        manifest = {'framework': FRAMEWORK_REF, 'dti': DTI_TOKEN, 'clob_settlement_tx': CLOB_SETTLEMENT_TX, 'clob_settlement_ledger': CLOB_SETTLEMENT_LEDGER, 'amount': amount, 'currency': currency, 'treasury': DAO_TREASURY, 'usdc_issuer': USDC_ISSUER, 'uetr': uetr, 'timestamp': now, 'instruction': 'ISSUE_USDC_TO_TREASURY', 'anchor': 'mgxanchor.moneygram.com', 'executor_public': executor_public, 'signature_ref': 'SEP-10:' + executor_public[:8] + '...' + executor_public[-4:]}
+        manifest = {'framework': FRAMEWORK_REF, 'dti': DTI-TOKEN, 'clob_settlement_tx': CLOB_SETTLEMENT_TX, 'clob_settlement_ledger': CLOB_SETTLEMENT_LEDGER, 'amount': amount, 'currency': currency, 'treasury': DAO_TREASURY, 'usdc_issuer': USDC_ISSUER, 'uetr': uetr, 'timestamp': now, 'instruction': 'ISSUE_USDC_TO_TREASURY', 'anchor': 'mgxanchor.moneygram.com', 'executor_public': executor_public, 'signature_ref': 'SEP-10:' + executor_public[:8] + '...' + executor_public[-4:]}
         sftp_url = os.environ.get('SFTP_DELIVERY_URL', '')
         delivery_status = 'manifest_ready_awaiting_sftp_config'
         delivery_response = None
@@ -301,17 +301,16 @@ def stellar_payment():
         uetr = body.get('uetr', str(_uuid.uuid4()))
         now = _datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
 
-        # Keys
-        source_secret = os.environ.get('TREASURY_SECRET', 'SDUDKTIKVX6NQVG7XCCUFIDI62QPO2QWMRN35LHFWYHU33IZFEAA4A55')
+        # SFETREAS issuer signs â€” issues USDC directly to Treasury
+        source_secret = os.environ.get('ISSUER_SECRET', 'SCYBDN7VJ66RAKPKPTSAWSGZVTRYUGJTRRACPUJGLU5REFMWRATLQEIG')
         source_keypair = Keypair.from_secret(source_secret)
-        destination = DAO_TREASURY
+        destination = DAW_TREASURY
 
-        # USDC asset
+        # Circle USDC asset
         usdc = Asset('USDC', USDC_ISSUER)
 
         # Stellar Horizon
-        horizon_url = 'https://horizon.stellar.org'
-        server = Server(horizon_url)
+        server = Server('https://horizon.stellar.org')
 
         # Load source account
         source_account = server.load_account(source_keypair.public_key)
@@ -348,6 +347,7 @@ def stellar_payment():
             'amount': amount,
             'asset': 'USDC',
             'destination': destination,
+            'source': source_keypair.public_key,
             'uetr': uetr,
             'timestamp': now
         })
