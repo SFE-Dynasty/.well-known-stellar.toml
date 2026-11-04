@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Fiduciary Clearing Engine + DAO Treasury Intelligent Search Relay
-Production v4.2.0 â€” Yahoo HTML scraping + RSS parsing, no DD, no cold-start dependency
+Production v4.2.1 â€” Yahoo HTML scraping + RSS parsing, no DD, no cold-start dependency
 """
 
 import os
@@ -22,10 +22,11 @@ app = Flask(__name__)
 
 searxno_ready = False
 
-DAO_TREASURY = 'GCATMWLZ7EU7EUWH“S56S@¡È-eUSQQBALHGF3XH4IZCOPJHFB5DJQW'
-FRAMEWORK_REF = 'US-SFG-PFIA-2025-T1A01'
+DAO_TREASURY = 'GCATMWLZ7EU7EUWJ3LS6SBHKILWEUS3QBALHGF3XH4IZCOPJHFB5DJYW'
+FRAMEWORK_REF = 'US-SFE-PFIA-2025-T1A01'
 DTI_TOKEN = 'BGP5VXJME'
-USDC_ISSUER = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KFX3IHOJAPP5RE34K4KZVN'
+USDC_ISSUER = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
+USD_ISSUER = 'GCVDS3YYXQVFVVG4HSIBZAHQJAGMQUM6ZTJHUOQGEZHEV4VN2CX5SAT3'
 CLOB_SETTLEMENT_TX = '65947e881619d0374c69a25481665f05f9e0d59e84cf79438961ed5bfefdd58b'
 CLOB_SETTLEMENT_LEDGER = '65120726'
 SETTLEMENT_AMOUNT = '250000'
@@ -34,7 +35,7 @@ def start_searxng():
     global searxno_ready
     try:
         env = os.environ.copy()
-        env['SEARXLŽG_SETTINGS_PATH'] = '/etc/searxng/settings.yml'
+        env['SEARXNG_SETTINGS_PATH'] = '/etc/searxng/settings.yml'
         subprocess.Popen(
             ['python', '-m', 'searxng.webapp'],
             env=env,
@@ -225,7 +226,7 @@ def health():
 
 @app.route('/')
 def index():
-    return jsonify({'service': 'DAO Treasury Clearing Engine', 'version': '4.2.0'})
+    return jsonify({'service': 'DAO Treasury Clearing Engine', 'version': '4.2.1'})
 
 @app.route('/pacs008', methods=['POST', 'GET'])
 def pacs008():
@@ -242,7 +243,7 @@ def pacs008():
             'Cdtr': DAO_TREASURY, 'UETR': uetr,
             'RmtInf': FRAMEWORK_REF + ' DTI:' + DTI_TOKEN + ' CLOB:' + CLOB_SETTLEMENT_TX
         }
-        return jsonify({'status': 'accepted', 'step': 'pacs008', 'msg_id': msg_id, 'uetr': uetr, 'amount': amount, 'currency': currency, 'treasury': DAW_TREASURY, 'framework': FRAMEWORK_REF, 'dti': DTI_TOKEN, 'clob_settlement_tx': CLOB_SETTLEMENT_TX, 'payload': payload, 'timestamp': now})
+        return jsonify({'status': 'accepted', 'step': 'pacs008', 'msg_id': msg_id, 'uetr': uetr, 'amount': amount, 'currency': currency, 'treasury': DAO_TREASURY, 'framework': FRAMEWORK_REF, 'dti': DTI_TOKEN, 'clob_settlement_tx': CLOB_SETTLEMENT_TX, 'payload': payload, 'timestamp': now})
     except Exception as e:
         return jsonify({'status': 'error', 'step': 'pacs008', 'error': str(e)}), 500
 
@@ -258,7 +259,7 @@ def ach():
         moov_status = 'pending'
         moov_response = None
         try:
-            r = requests.post(moov_url + '/transfers', json=ach_payload, timeout=5)
+            r = requests.post(moov_url + '/files/create', json=ach_payload, timeout=5)
             moov_status = 'submitted' if r.status_code in [200, 201, 202] else 'error'
             moov_response = r.text[:200]
         except Exception as moov_err:
@@ -277,7 +278,7 @@ def transmit():
         currency = body.get('currency', 'USD')
         now = _datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
         executor_public = os.environ.get('EXECUTOR_PUBLIC', 'GCHQWVJ56MQNWSDAXSQEO74WIT76VCCDYLWOWATGRD7SNMCZIQOCEHML')
-        manifest = {'framework': FRAMEWORK_REF, 'dti': DTI-TOKEN, 'clob_settlement_tx': CLOB_SETTLEMENT_TX, 'clob_settlement_ledger': CLOB_SETTLEMENT_LEDGER, 'amount': amount, 'currency': currency, 'treasury': DAO_TREASURY, 'usdc_issuer': USDC_ISSUER, 'uetr': uetr, 'timestamp': now, 'instruction': 'ISSUE_USDC_TO_TREASURY', 'anchor': 'mgxanchor.moneygram.com', 'executor_public': executor_public, 'signature_ref': 'SEP-10:' + executor_public[:8] + '...' + executor_public[-4:]}
+        manifest = {'framework': FRAMEWORK_REF, 'dti': DTI_TOKEN, 'clob_settlement_tx': CLOB_SETTLEMENT_TX, 'clob_settlement_ledger': CLOB_SETTLEMENT_LEDGER, 'amount': amount, 'currency': currency, 'treasury': DAO_TREASURY, 'usdc_issuer': USDC_ISSUER, 'uetr': uetr, 'timestamp': now, 'instruction': 'ISSUE_USDC_TO_TREASURY', 'anchor': 'mgxanchor.moneygram.com', 'executor_public': executor_public, 'signature_ref': 'SEP-10:' + executor_public[:8] + '...' + executor_public[-4:]}
         sftp_url = os.environ.get('SFTP_DELIVERY_URL', '')
         delivery_status = 'manifest_ready_awaiting_sftp_config'
         delivery_response = None
@@ -301,13 +302,13 @@ def stellar_payment():
         uetr = body.get('uetr', str(_uuid.uuid4()))
         now = _datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
 
-        # SFETREAS issuer signs â€” issues USDC directly to Treasury
-        source_secret = os.environ.get('ISSUER_SECRET', 'SCYBDN7VJ66RAKPKPTSAWSGZVTRYUGJTRRACPUJGLU5REFMWRATLQEIG')
+        # GCHQ Fiduciary Executor signs - sends USD:GCVDS3 to DAO Treasury
+        source_secret = os.environ.get('GCHQ_SECRET', 'SBTXFQABN3XNCJJFZGOQRQO3P4USQTG2INX2UVOHWUCKRZRNRWU7FZR7')
         source_keypair = Keypair.from_secret(source_secret)
-        destination = DAW_TREASURY
+        destination = DAO_TREASURY
 
-        # Circle USDC asset
-        usdc = Asset('USDC', USDC_ISSUER)
+        # USD:GCVDS3 - CLOB Cold Issuer asset
+        usd_asset = Asset('USD', USD_ISSUER)
 
         # Stellar Horizon
         server = Server('https://horizon.stellar.org')
@@ -324,7 +325,7 @@ def stellar_payment():
             )
             .append_payment_op(
                 destination=destination,
-                asset=usdc,
+                asset=usd_asset,
                 amount=amount,
                 source=source_keypair.public_key
             )
@@ -345,7 +346,7 @@ def stellar_payment():
             'tx_hash': response.get('hash', ''),
             'ledger': response.get('ledger', ''),
             'amount': amount,
-            'asset': 'USDC',
+            'asset': 'USD',
             'destination': destination,
             'source': source_keypair.public_key,
             'uetr': uetr,
@@ -358,3 +359,4 @@ def stellar_payment():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port)
+
