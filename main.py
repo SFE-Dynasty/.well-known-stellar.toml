@@ -278,7 +278,7 @@ def transmit():
         currency = body.get('currency', 'USD')
         now = _datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
         executor_public = os.environ.get('EXECUTOR_PUBLIC', 'GCHQWVJ56MQNWSDAXSQEO74WIT76VCCDYLWOWATGRD7SNMCZIQOCEHML')
-        manifest = {'framework': FRAMEWORK_REF, 'dti': DTI_TOKEN, 'clob_settlement_tx': CLOB_SETTLEMENT_TX, 'clob_settlement_ledger': CLOB_SETTLEMENT_LEDGER, 'amount': amount, 'currency': currency, 'treasury': DAO_TREASURY, 'usdc_issuer': USDC_ISSUER, 'uetr': uetr, 'timestamp': now, 'instruction': 'ISSUE_USDC_TO_TREASURY', 'anchor': 'mgxanchor.moneygram.com', 'executor_public': executor_public, 'signature_ref': 'SEP-10:' + executor_public[:8] + '...' + executor_public[-4:]}
+        manifest = {'framework': FRAMEWORK_REF, 'dti': DTI_TOKEN, 'clob_settlement_tx': CLOB_SETTLEMENT_TX, 'clob_settlement_ledger': CLOB_SETTLEMENT_LEDGER, 'amount': amount, 'currency': currency, 'treasury': DAO_TREASURY, 'usd_issuer': USD_ISSUER, 'uetr': uetr, 'timestamp': now, 'instruction': 'ISSUE_USD_TO_TREASURY', 'anchor': 'mgxanchor.moneygram.com', 'executor_public': executor_public, 'signature_ref': 'SEP-10:' + executor_public[:8] + '...' + executor_public[-4:]}
         sftp_url = os.environ.get('SFTP_DELIVERY_URL', '')
         delivery_status = 'manifest_ready_awaiting_sftp_config'
         delivery_response = None
