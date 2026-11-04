@@ -239,7 +239,7 @@ def pacs008():
         now = _datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
         payload = {
             'MsgId': msg_id, 'CreDtTm': now, 'NbOfTxs': '1',
-            'IntrBkSttlmAmt': {('Ccy': currency, 'value': amount},
+            'IntrBkSttlmAmt': {'Ccy': currency, 'value': amount},
             'Cdtr': DAO_TREASURY, 'UETR': uetr,
             'RmtInf': FRAMEWORK_REF + ' DTI:' + DTI_TOKEN + ' CLOB:' + CLOB_SETTLEMENT_TX
         }
@@ -359,4 +359,5 @@ def stellar_payment():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port)
+
 
