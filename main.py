@@ -220,13 +220,13 @@ def health():
     return jsonify({
         'status': 'healthy',
         'engine': 'CLOB Orchestration Layer',
-        'version': '4.2.0-production',
+        'version': '4.3.1-production',
         'searxno_ready': searxno_ready
     })
 
 @app.route('/')
 def index():
-    return jsonify({'service': 'DAO Treasury Clearing Engine', 'version': '4.3.0'})
+    return jsonify({'service': 'DAO Treasury Clearing Engine', 'version': '4.3.1'})
 
 @app.route('/pacs008', methods=['POST', 'GET'])
 def pacs008():
@@ -239,7 +239,9 @@ def pacs008():
         now = _datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
         payload = {
             'MsgId': msg_id, 'CreDtTm': now, 'NbOfTxs': '1',
-            'IntrBkSttlmAmt': {'Ccy': currency, 'value': amount},
+            'IntrBkSttlmAmt': {'Ccy': currency, 'value': '{:.2f}'.format(float(amount))},
+            'SttlmInf': '<SttlmMtd>CLRG</SttlmMtd><ClrSys><Prtry>TRLQ</Prtry></ClrSys>',
+            'SvcLvl': '<Prtry>STCO</Prtry>',
             'Cdtr': DAO_TREASURY, 'UETR': uetr,
             'RmtInf': FRAMEWORK_REF + ' DTI:' + DTI_TOKEN + ' CLOB:' + CLOB_SETTLEMENT_TX
         }
@@ -421,4 +423,5 @@ def stellar_payment():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port)
+
 
